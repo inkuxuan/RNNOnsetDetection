@@ -31,9 +31,11 @@ def plot_music_net_roll(labels_, sr, start=0, end=30):
     plt.show()
 
 
-def plot_odf(odf, title="ODF"):
+def plot_odf(odf, title="ODF", onset_target=None):
     fig = plt.figure()
     plt.plot(odf)
+    if onset_target is not None:
+        plt.plot(onset_target)
     plt.title(title)
     plt.show()
 

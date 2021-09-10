@@ -22,6 +22,8 @@ def get_device():
 
 
 device = get_device()
+
+
 # device = torch.device('cpu')
 
 
@@ -36,7 +38,8 @@ class SingleOutRNN(nn.Module):
     An RNN followed by a single output unit (sigmoid activation)
     """
 
-    def __init__(self, input_size, hidden_size, num_layers, nonlinearity='tanh', bidirectional=False):
+    def __init__(self, input_size, hidden_size, num_layers, nonlinearity='tanh', bidirectional=False, sigmoid=True,
+                 dtype=torch.float):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -46,52 +49,16 @@ class SingleOutRNN(nn.Module):
                                 batch_first=True,
                                 nonlinearity=nonlinearity, bidirectional=bidirectional)
         self.final = nn.Linear(hidden_size, 1)
-
-        self.apply(init_parameters)
-
-    def forward(self, data, hidden=None):
-        if hidden is None:
-            hidden = torch.zeros((self.num_layers, self.n_direction, self.hidden_size),
-                                 device=device, dtype=torch.float)
-        output, hidden_next = self.recurrent.forward(data, hidden)
-        output = self.final.forward(output)
-        output = torch.sigmoid(output)
-        return output, hidden_next
-
-
-class OneHotRNN(nn.Module):
-    r"""
-    An RNN followed by 2d one-hot output units (softmax activation function)
-    """
-
-    def __init__(self, input_size, hidden_size, num_layers, nonlinearity='tanh', bidirectional=False, softmax=False):
-        r"""
-
-        :param input_size:
-        :param hidden_size:
-        :param num_layers:
-        :param nonlinearity:
-        :param bidirectional:
-        :param softmax: If you use CrossEntropyLoss, leave it false.
-        """
-        super().__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.n_direction = 2 if bidirectional else 1
-        self.recurrent = nn.RNN(input_size, hidden_size, num_layers,
-                                batch_first=True,
-                                nonlinearity=nonlinearity, bidirectional=bidirectional)
-        self.final = nn.Linear(hidden_size, 2)
-        self.softmax = softmax
-        self.apply(init_parameters)
+        self.sigmoid = sigmoid
+        self.dtype = dtype
+        # self.apply(init_parameters)
 
     def forward(self, data, hidden=None):
         if hidden is None:
             hidden = torch.zeros((self.num_layers, self.n_direction, self.hidden_size),
-                                 device=device, dtype=torch.float)
+                                 device=device, dtype=self.dtype)
         output, hidden_next = self.recurrent.forward(data, hidden)
         output = self.final.forward(output)
-        if self.softmax:
-            output = torch.softmax(output, 2)
+        if self.sigmoid:
+            output = torch.sigmoid(output)
         return output, hidden_next

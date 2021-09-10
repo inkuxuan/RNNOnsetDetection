@@ -26,28 +26,43 @@ def merge_onsets(onsets, time_interval):
     return onsets
 
 
-def onset_list_to_target(onsets, sample_per_frame, length, mode='single', key=None):
+def onset_list_to_target(onsets, sample_per_frame, length, delta, mode='linear', key=None):
     r"""
     Convert an onset list to a target list for training
 
     -----
+    :param delta: if mode set to continuous or precise, number of frames to allow non-zero values
+    to appear around an onset, in each side
     :param onsets: List of onsets in sample number
     :param sample_per_frame: Number of samples per frame
     :param length: Length (in frames)
-    :param mode: one of `single`, `continuous`, `precise`
-    :param output: one of 'int', 'boolean'
+    :param mode: one of `single`, `linear`, `precise`
     :return: np array of length `length`, each representing the onset strength
     """
     # TODO continuous and precise target conversion
 
-    target = np.zeros(length, dtype=np.int)
+    fill_len = int(delta + 1)
+    # rising does not include 1
+    rising = np.linspace(0, 1, fill_len, endpoint=False)
+    # falling includes 1
+    falling = np.linspace(1, 0, fill_len, endpoint=False)
+
+    target = np.zeros(length, dtype=np.float)
     for onset in onsets:
         frame = int(math.floor(float(onset) / sample_per_frame))
+        # IndexError: out of bounds
+        if frame >= length:
+            frame = length - 1
         if mode == 'single':
-            if frame >= length:
-                frame = length-1
-            # IndexError: out of bounds
             target[frame] = 1
+        if mode == 'linear':
+            target[frame] = 1
+            # rising edge
+            n_out_of_range = np.max([fill_len - frame, 0])
+            target[frame - fill_len + n_out_of_range:frame] = rising[n_out_of_range:]
+            # falling edge
+            n_out_of_range = np.max([(frame + fill_len) - length + 1, 0])
+            target[frame: frame + fill_len - n_out_of_range] = falling[:fill_len - n_out_of_range]
     return target
 
 

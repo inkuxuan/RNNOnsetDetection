@@ -1,5 +1,6 @@
 import librosa
 import torch.optim
+from datetime import datetime
 
 import boeck.onset_program
 import datasets
@@ -73,7 +74,7 @@ def get_model_output(boeck_set, key, model, features, verbose=False):
         if verbose:
             print(f"Data preparation ({t1 - t0})")
         input_array = np.expand_dims(odfs, axis=0)
-        input_array = torch.from_numpy(input_array).to(device=networks.device).float()
+        input_array = torch.from_numpy(input_array).to(device=networks.device).type(model.dtype)
         t2 = time.perf_counter()
         if verbose:
             print(f"Tensor conversion ({t2 - t1})")
@@ -99,7 +100,9 @@ def train_network(boeck_set, training_set, validation_set, model, loss_fn, optim
 
     # epoch
     continue_epoch = True
-    for i in range(4):
+    i = -1
+    while continue_epoch:
+        i += 1
         for key_index in range(len(training_set)):
             t0 = time.perf_counter()
 
@@ -111,8 +114,8 @@ def train_network(boeck_set, training_set, validation_set, model, loss_fn, optim
             # output shape: (batch_size, length, target_dimension)
             input_array = np.expand_dims(odfs, axis=0)
 
-            input_array = torch.from_numpy(input_array).to(device=networks.device).float()
-            target = torch.from_numpy(target).to(device=networks.device).long()
+            input_array = torch.from_numpy(input_array).to(device=networks.device).type(model.dtype)
+            target = torch.from_numpy(target).to(device=networks.device).type(model.dtype)
 
             prediction, _ = model(input_array)
 
@@ -127,6 +130,8 @@ def train_network(boeck_set, training_set, validation_set, model, loss_fn, optim
                 f"{key} ({audio_len:.1f}s), speed {(audio_len / (t1 - t0)):.1f}x, {key_index + 1}/{len(training_set)}, "
                 f"epoch {i + 1}")
             print(f"loss: {loss.item():>7f}")
+            if loss.item() <= 0.05 or i >= 9:
+                continue_epoch = False
 
     # validation
     # TODO validation
@@ -134,7 +139,7 @@ def train_network(boeck_set, training_set, validation_set, model, loss_fn, optim
     continue_epoch = False
 
 
-def prepare_data(boeck_set, features, key):
+def prepare_data(boeck_set, features, key, normalize=True):
     r"""
     Notice that odfs is in shape (length, n_features), target is in shape (length)
 
@@ -146,9 +151,15 @@ def prepare_data(boeck_set, features, key):
     onsets_list = np.asarray(onset_seconds) * sr
     odfs = get_features(wave, n_fft=N_FFT, hop_size=HOP_SIZE, sr=sr, center=False, features=features)
     length = odfs.shape[1]
-    target = onsets.onset_list_to_target(onsets_list, HOP_SIZE, length, key=key)
+    # Normalize the odfs so that they range from 0 to 1
+    if normalize:
+        for i in range(len(odfs)):
+            max_value = np.max(odfs[i, :])
+            odfs[i, :] = odfs[i, :] / max_value
 
-    # arrange dimensions so that the model can accept
+    target = onsets.onset_list_to_target(onsets_list, HOP_SIZE, length, ONSET_DELTA * sr / HOP_SIZE, key=key)
+
+    # arrange dimensions so that the model can accept (shape==[seq_len, n_feature])
     odfs = odfs.T
 
     return length, odfs, target, onset_seconds, len(wave) / sr
@@ -157,7 +168,7 @@ def prepare_data(boeck_set, features, key):
 def train_and_test(boeck_set, splits, test_split_index,
                    num_layers=2, num_layer_unit=4,
                    strategy='softmax',
-                   learning_rate=0.05,
+                   learning_rate=0.1,
                    features=None):
     if features is None:
         features = ['complex_domain', 'super_flux']
@@ -166,7 +177,7 @@ def train_and_test(boeck_set, splits, test_split_index,
     # TODO implementing other strategies
     assert strategy == 'softmax'
     # input: superflux + cd (for now)
-    rnn = networks.OneHotRNN(len(features), num_layer_unit, num_layers).to(networks.device)
+    rnn = networks.SingleOutRNN(len(features), num_layer_unit, num_layers).to(networks.device)
     loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(rnn.parameters(), lr=learning_rate)
     train_network(boeck_set, training_set, validation_set, rnn, loss_fn, optimizer,
@@ -188,40 +199,49 @@ def test_network_training():
     boeck_set = datasets.BockSet()
     splits = boeck_set.splits
     features = ['super_flux']
-    model = networks.OneHotRNN(len(features), 4, 2).to(networks.device)
-    loss_fn = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.05)
+    model = networks.SingleOutRNN(len(features), 4, 2, sigmoid=False).to(networks.device)
+
+    frame_rate = 44100 / HOP_SIZE
+    loss_fn = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.3)
 
     output, hidden = get_model_output(boeck_set, splits[0][0], model, features)
+    output = torch.sigmoid(output)
     output = output.squeeze()
-    output = torch.log_softmax(output, 1)
     output = output.T
     output = output.cpu()
-    utils.plot_odf(output[1, :], title="Network(RAW)")
+    utils.plot_odf(output, title="Network(RAW)")
 
-    train_network(boeck_set, splits[1], None, model, loss_fn, optimizer,
+    train_network(boeck_set, splits[0], None, model, loss_fn, optimizer,
                   features=features)
 
-    piece = boeck_set.get_piece(splits[0][0])
-    wave, _, sr = piece.get_data()
-    stft = librosa.stft(wave, N_FFT, HOP_SIZE, center=False)
-    super_flux, _, _ = odf.super_flux_odf(stft, sr, N_FFT, HOP_SIZE)
+    # piece = boeck_set.get_piece(splits[0][0])
+    # wave, _, sr = piece.get_data()
+    # stft = librosa.stft(wave, N_FFT, HOP_SIZE, center=False)
+    # super_flux, _, _ = odf.super_flux_odf(stft, sr, N_FFT, HOP_SIZE)
 
     output, _ = get_model_output(boeck_set, splits[0][0], model, features)
+    output = torch.sigmoid(output)
     output = output.squeeze()
-    output = torch.log_softmax(output, 1)
     output = output.T
     output = output.cpu()
-    utils.plot_odf(output[1, :], title="Network(Trained)")
-    utils.plot_odf(super_flux, title="SuperFlux")
+    utils.plot_odf(output, title="Network(Trained)")
 
-    print(hidden)
+    length, odfs, target, onset_seconds, audio_len = prepare_data(boeck_set, features, splits[0][0])
+    utils.plot_odf(odfs, title="SuperFlux")
+    utils.plot_odf(target, title="Target")
+
+    now = datetime.now()
+    dstr = now.strftime("%Y-%m-%d %H%M%S")
+    torch.save(model, 'model-' + dstr + '.pt')
+
+    # print(hidden)
 
 
 def test_output():
     boeck_set = datasets.BockSet()
     t0 = time.perf_counter()
-    model = networks.OneHotRNN(2, 4, 2).to(networks.device)
+    model = networks.SingleOutRNN(2, 4, 2).to(networks.device)
     t1 = time.perf_counter()
     print(f"Network initialized ({t1 - t0})")
     prediction, _ = get_model_output(boeck_set, boeck_set.get_split(0)[0], model,
