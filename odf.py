@@ -5,41 +5,24 @@ import librosa
 def complex_domain_odf(stft, aggregate=np.mean):
     r"""
     Calculate onset and offset strength array from the stft frames
+    This implementation is derived from Boeck's
+
+    ------
     :param stft: stft frames, must having complex values in each element
     :param aggregate: aggregate function, default mean()
     :return: (onset_strength, offset_strength)
     """
-    n_frame = stft.shape[1]
-    amplitude = abs(stft)
-    phase = np.angle(stft)
-    # note that phase_diff[n] = phase[n+1] - phase[n]
-    phase_diff = phase[:, 1:] - phase[:, :-1]
-    real = np.empty_like(stft, dtype=np.complex_)
-    imag = np.empty_like(stft, dtype=np.complex_)
-
-    # prediction
-    # . . . . . . . .  <- stft frames
-    # ^ ^ difference calculated
-    # 0 1 ^ predicted
-
-    # calculate real and imaginary part of the complex numbers (predicted)
-    real[:, 2:] = amplitude[:, 1:-1] * np.cos(phase[:, 1:-1] + phase_diff[:, :-1])
-    imag[:, 2:] = amplitude[:, 1:-1] * np.sin(phase[:, 1:-1] + phase_diff[:, :-1])
-    predict_stft = real + imag * 1j
-
-    diff_stft_prediction = np.subtract(stft, predict_stft)
-    diff_stft_prediction[:, 0:2] = 0  # set #0 and #1 to be 0 (not calculated)
-    onset_strength_multi = np.empty_like(diff_stft_prediction, dtype=float)
-    # half-wave rectify
-    for i in range(stft.shape[1]):  # frames
-        for j in range(stft.shape[0]):  # freq bins
-            if abs(stft[j, i]) >= abs(predict_stft[j, i]):
-                onset_strength_multi[j, i] = abs(diff_stft_prediction[j, i])
-            else:
-                onset_strength_multi[j, i] = 0
-    onset_strength = aggregate(onset_strength_multi, axis=0)
-    # noinspection PyRedundantParentheses
-    return onset_strength
+    phase = np.arctan2(np.imag(stft), np.real(stft))
+    # expected X
+    cd_target = np.zeros_like(phase)
+    # assume constant phase change
+    cd_target[:, 1:] = 2 * phase[:, 1:] - phase[:, :-1]
+    # take cd_target(phase) and add magnitude
+    cd_target = np.abs(stft) * np.exp(1j * cd_target)
+    # comp:lex spectrogram
+    stft[:, 1:] -= cd_target[:, :-1]
+    stft[:, 0] = 0
+    return aggregate(np.abs(stft), axis=0)
 
 
 def _tone_frequencies(band_per_octave, f_min=27.5, f_max=17000, initial_freq=440):
@@ -255,7 +238,7 @@ def _main():
     hop_length = 512
 
     x, sr = librosa.load('music/Paganini.m4a', sr=22050)
-    idx = slice(*list(librosa.time_to_frames([10, 30])))
+    idx = slice(*list(librosa.time_to_samples([10, 30], sr=sr)))
     x = x[idx]
     stft = librosa.stft(x, n_fft=n_fft, hop_length=hop_length)
     odf = complex_domain_odf(stft)
@@ -272,9 +255,9 @@ def _main():
     axs[0].plot(odf[segment])
     axs[0].set_title('Complex Domain')
     axs[1].plot(mel_onset[segment])
-    axs[1].set_title('SuperFlux')
+    axs[1].set_title('Mel-scale SF')
     axs[2].plot(sf[segment])
-    axs[2].set_title('LogFilt Flux')
+    axs[2].set_title('SuperFlux')
     plt.show()
 
     fig, ax = plt.subplots(3)

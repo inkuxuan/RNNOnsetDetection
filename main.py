@@ -102,7 +102,6 @@ def train_network(boeck_set, training_set, validation_set, model, loss_fn, optim
     continue_epoch = True
     i = -1
     while continue_epoch:
-        i += 1
         for key_index in range(len(training_set)):
             t0 = time.perf_counter()
 
@@ -130,7 +129,7 @@ def train_network(boeck_set, training_set, validation_set, model, loss_fn, optim
                 f"{key} ({audio_len:.1f}s), speed {(audio_len / (t1 - t0)):.1f}x, {key_index + 1}/{len(training_set)}, "
                 f"epoch {i + 1}")
             print(f"loss: {loss.item():>7f}")
-            if loss.item() <= 0.05 or i >= 9:
+            if loss.item() <= 0.05 or i >= 10:
                 continue_epoch = False
 
     # validation
@@ -198,7 +197,7 @@ def test_network_training():
     print(f"device: {networks.device}")
     boeck_set = datasets.BockSet()
     splits = boeck_set.splits
-    features = ['super_flux']
+    features = ['super_flux', 'complex_domain']
     model = networks.SingleOutRNN(len(features), 4, 2, sigmoid=False).to(networks.device)
 
     frame_rate = 44100 / HOP_SIZE
@@ -250,6 +249,17 @@ def test_output():
     print(prediction.shape)
     print(next(model.parameters()).is_cuda)
     print(prediction.is_cuda)
+
+
+def test_prepare_data():
+    boeck_set = datasets.BockSet()
+    splits = boeck_set.splits
+    features = ['super_flux', 'complex_domain']
+    for i in range(len(splits[0])):
+        t0 = time.perf_counter()
+        length, odfs, target, onset_seconds, audio_len = prepare_data(boeck_set, features, splits[0][i])
+        t1 = time.perf_counter()
+        print(f"{audio_len:.2f}s, elapsed {t1-t0:.2f}, {audio_len/(t1-t0):.1f}x speed")
 
 
 if __name__ == '__main__':
