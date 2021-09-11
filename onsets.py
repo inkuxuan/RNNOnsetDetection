@@ -57,12 +57,20 @@ def onset_list_to_target(onsets, sample_per_frame, length, delta, mode='linear',
             target[frame] = 1
         if mode == 'linear':
             target[frame] = 1
+
             # rising edge
             n_out_of_range = np.max([fill_len - frame, 0])
-            target[frame - fill_len + n_out_of_range:frame] = rising[n_out_of_range:]
+            # actual applied length
+            d = fill_len - n_out_of_range
+            # applying maximum to avoid overwriting close onsets
+            target[frame - d] = np.maximum(rising[n_out_of_range:], target[frame - d:frame])
+
             # falling edge
             n_out_of_range = np.max([(frame + fill_len) - length + 1, 0])
-            target[frame: frame + fill_len - n_out_of_range] = falling[:fill_len - n_out_of_range]
+            # actual applied length
+            d = fill_len - n_out_of_range
+            # applying maximum to avoid overwriting close onsets
+            target[frame: frame + d] = np.maximum(falling[:d], target[frame: frame + d])
     return target
 
 

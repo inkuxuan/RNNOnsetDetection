@@ -48,14 +48,15 @@ class SingleOutRNN(nn.Module):
         self.recurrent = nn.RNN(input_size, hidden_size, num_layers,
                                 batch_first=True,
                                 nonlinearity=nonlinearity, bidirectional=bidirectional)
-        self.final = nn.Linear(hidden_size, 1)
+        self.final = nn.Linear(hidden_size * self.n_direction, 1)
         self.sigmoid = sigmoid
         self.dtype = dtype
         # self.apply(init_parameters)
 
     def forward(self, data, hidden=None):
         if hidden is None:
-            hidden = torch.zeros((self.num_layers, self.n_direction, self.hidden_size),
+            batch_size = data.shape[0]
+            hidden = torch.zeros((self.num_layers * self.n_direction, batch_size, self.hidden_size),
                                  device=device, dtype=self.dtype)
         output, hidden_next = self.recurrent.forward(data, hidden)
         output = self.final.forward(output)

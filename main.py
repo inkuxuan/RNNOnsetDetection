@@ -1,19 +1,19 @@
-import librosa
-import torch.optim
-from datetime import datetime
-
 import boeck.onset_program
 import datasets
 import networks
 import onsets
 import odf
-import numpy as np
-import boeck.onset_evaluation
 import utils
-from boeck.onset_evaluation import Counter
-from torch import nn
 
+import librosa
+from datetime import datetime
 import time
+
+import numpy as np
+from torch import nn
+import torch.optim
+import boeck.onset_evaluation
+from boeck.onset_evaluation import Counter
 
 N_FFT = 2048
 HOP_SIZE = 441
@@ -100,8 +100,9 @@ def train_network(boeck_set, training_set, validation_set, model, loss_fn, optim
 
     # epoch
     continue_epoch = True
-    i = -1
+    i = 0
     while continue_epoch:
+        i += 1
         for key_index in range(len(training_set)):
             t0 = time.perf_counter()
 
@@ -127,7 +128,7 @@ def train_network(boeck_set, training_set, validation_set, model, loss_fn, optim
             t1 = time.perf_counter()
             print(
                 f"{key} ({audio_len:.1f}s), speed {(audio_len / (t1 - t0)):.1f}x, {key_index + 1}/{len(training_set)}, "
-                f"epoch {i + 1}")
+                f"epoch {i}")
             print(f"loss: {loss.item():>7f}")
             if loss.item() <= 0.05 or i >= 10:
                 continue_epoch = False
@@ -156,7 +157,8 @@ def prepare_data(boeck_set, features, key, normalize=True):
             max_value = np.max(odfs[i, :])
             odfs[i, :] = odfs[i, :] / max_value
 
-    target = onsets.onset_list_to_target(onsets_list, HOP_SIZE, length, ONSET_DELTA * sr / HOP_SIZE, key=key)
+    target = onsets.onset_list_to_target(onsets_list, HOP_SIZE, length, ONSET_DELTA * sr / HOP_SIZE, key=key,
+                                         mode='linear')
 
     # arrange dimensions so that the model can accept (shape==[seq_len, n_feature])
     odfs = odfs.T
@@ -198,7 +200,7 @@ def test_network_training():
     boeck_set = datasets.BockSet()
     splits = boeck_set.splits
     features = ['super_flux', 'complex_domain']
-    model = networks.SingleOutRNN(len(features), 4, 2, sigmoid=False).to(networks.device)
+    model = networks.SingleOutRNN(len(features), 4, 2, sigmoid=False, bidirectional=True).to(networks.device)
 
     frame_rate = 44100 / HOP_SIZE
     loss_fn = nn.BCEWithLogitsLoss()
@@ -259,7 +261,7 @@ def test_prepare_data():
         t0 = time.perf_counter()
         length, odfs, target, onset_seconds, audio_len = prepare_data(boeck_set, features, splits[0][i])
         t1 = time.perf_counter()
-        print(f"{audio_len:.2f}s, elapsed {t1-t0:.2f}, {audio_len/(t1-t0):.1f}x speed")
+        print(f"{audio_len:.2f}s, elapsed {t1 - t0:.2f}, {audio_len / (t1 - t0):.1f}x speed")
 
 
 if __name__ == '__main__':
