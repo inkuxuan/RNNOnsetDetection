@@ -1,3 +1,5 @@
+import random
+
 import boeck.onset_program
 import datasets
 import networks
@@ -5,10 +7,12 @@ import onsets
 import odf
 import utils
 
-import librosa
 from datetime import datetime
 import time
+from concurrent.futures import ThreadPoolExecutor
+from itertools import repeat
 
+import librosa
 import numpy as np
 from torch import nn
 import torch.optim
@@ -18,6 +22,8 @@ from boeck.onset_evaluation import Counter
 N_FFT = 2048
 HOP_SIZE = 441
 ONSET_DELTA = 0.030
+# Number of cores in CPU, used to multithreading in Onset Detection Function calculations
+CPU_CORES = 6
 
 
 def get_sets(splits, test_split_index) -> tuple[list, list, list]:
@@ -36,6 +42,8 @@ def get_sets(splits, test_split_index) -> tuple[list, list, list]:
 
 def get_features(wave, features=None, n_fft=2048, hop_size=440, sr=44100, center=False) -> np.ndarray:
     r"""
+    :param wave: audio wave
+    :param features: list of features (str), in ['cd', 'rcd', 'superflux']
     :return: ndarray, axis 0 being feature type, axis 1 being the length of a sequence
     """
     if features is None:
@@ -43,10 +51,13 @@ def get_features(wave, features=None, n_fft=2048, hop_size=440, sr=44100, center
     stft = librosa.stft(wave, n_fft=n_fft, hop_length=hop_size, center=center)
     f = []
     for feature in features:
-        if feature == 'complex_domain':
+        if feature in ['complex_domain', 'cd']:
             onset_strength = odf.complex_domain_odf(stft)
             f.append(onset_strength)
-        elif feature == 'super_flux':
+        elif feature in ['rectified_complex_domain', 'rcd']:
+            onset_strength = odf.complex_domain_odf(stft, rectify=True)
+            f.append(onset_strength)
+        elif feature in ['super_flux', 'superflux']:
             onset_strength, _, _ = odf.super_flux_odf(stft, sr, n_fft, hop_size, center)
             f.append(onset_strength)
     return np.asarray(f)
@@ -86,6 +97,58 @@ def get_model_output(boeck_set, key, model, features, verbose=False):
     return out
 
 
+class BoeckDataLoader(object):
+
+    def __init__(self, boeck_set, training_set_keys, batch_size, shuffle=True, features=None):
+        self.boeck_set = boeck_set
+        self.training_set = training_set_keys
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.features = features
+
+    def _shuffle(self):
+        random.shuffle(self.training_set)
+
+    def generate_data(self):
+        r"""
+        Generator that yields (input_ndarray, target_ndarray, total_audio_length)
+        Note that total length is in seconds.
+        Input array shape: (batch_size, max_length, n_features)
+        Target shape: (batch_size, max_length)
+        max_length is the maximum length of all sequences in a batch
+        """
+        if self.shuffle:
+            self._shuffle()
+        index = 0
+        data_size = len(self.training_set)
+        while index < data_size:
+            # current batch size
+            b_size = self.batch_size
+            if index + b_size >= data_size:
+                b_size = data_size - index - 1
+            end_index = index + b_size
+            keys = self.training_set[index:end_index]
+
+            # concurrent, prepare ODFs for every piece in the batch
+            with ThreadPoolExecutor(max_workers=max([CPU_CORES, b_size])) as executor:
+                results = executor.map(prepare_data, repeat(self.boeck_set), repeat(self.features), keys)
+                results = list(zip(*results))
+                lengths = results[0]
+                odfs_list = results[1]
+                target_list = results[2]
+                audio_in_seconds = results[4]
+            maxlen=np.max(lengths)
+            total_audio_length = np.sum(audio_in_seconds)
+
+            # resize (pad zeros) ndarrays to form a batch
+            # input shape: (batch_size, max_length_frames, features)
+            input_np = np.array([np.resize(odfs, (maxlen, odfs.shape[1])) for odfs in odfs_list])
+            # target shape: (batch_size, max_length_frames)
+            target_np = np.array([np.resize(target, maxlen) for target in target_list])
+            yield input_np, target_np, total_audio_length
+            index = end_index
+
+
 def train_network(boeck_set, training_set, validation_set, model, loss_fn, optimizer,
                   features=None):
     r"""
@@ -95,8 +158,6 @@ def train_network(boeck_set, training_set, validation_set, model, loss_fn, optim
     :param features: Feature functions
     :return: Counter in validation set
     """
-    if features is None:
-        features = ['complex_domain', 'super_flux']
 
     # epoch
     continue_epoch = True
@@ -111,7 +172,7 @@ def train_network(boeck_set, training_set, validation_set, model, loss_fn, optim
             length, odfs, target, _, audio_len = prepare_data(boeck_set, features, key)
             # training model
             # input shape: (batch_size, length, n_feature)
-            # output shape: (batch_size, length, target_dimension)
+            # output shape: (batch_size, length)
             input_array = np.expand_dims(odfs, axis=0)
 
             input_array = torch.from_numpy(input_array).to(device=networks.device).type(model.dtype)
@@ -143,7 +204,7 @@ def prepare_data(boeck_set, features, key, normalize=True):
     r"""
     Notice that odfs is in shape (length, n_features), target is in shape (length)
 
-    :return: length, onset_detection_function_values, target_values, onset_list_in_seconds, audio_length_sec
+    :return: length(frames), onset_detection_function_values, target_values, onset_list_in_seconds, audio_length_sec
     """
     piece = boeck_set.get_piece(key)
     wave, onsets_list, sr = piece.get_data()
@@ -264,5 +325,20 @@ def test_prepare_data():
         print(f"{audio_len:.2f}s, elapsed {t1 - t0:.2f}, {audio_len / (t1 - t0):.1f}x speed")
 
 
+def test_data_loader():
+    batch_size = 8
+    boeck = datasets.BockSet()
+    training_set, _, _ = get_sets(boeck.splits, 0)
+    loader = BoeckDataLoader(boeck, training_set, batch_size)
+    t0 = time.perf_counter()
+    v_in, target, total_len = next(loader.generate_data())
+    t1 = time.perf_counter()
+    print("Input array shape:", v_in.shape)
+    print("Target array shape: ", target.shape)
+    print("Time elapsed: ", (t1-t0), ", Speed: ", total_len/(t1-t0), "x")
+    assert v_in.shape[0] == batch_size
+    assert target.shape[0] == batch_size
+
+
 if __name__ == '__main__':
-    test_network_training()
+    test_data_loader()
