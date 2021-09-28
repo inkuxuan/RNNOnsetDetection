@@ -1,28 +1,39 @@
 import numpy as np
 import librosa
 
+import datasets
+import utils
 
-def complex_domain_odf(stft, aggregate=np.mean):
+
+def complex_domain_odf(stft, aggregate=np.mean, rectify=True):
     r"""
     Calculate onset and offset strength array from the stft frames
     This implementation is derived from Boeck's
 
     ------
+    :param rectify: apply rectification that only preserve rising magnitude
     :param stft: stft frames, must having complex values in each element
     :param aggregate: aggregate function, default mean()
     :return: (onset_strength, offset_strength)
     """
     phase = np.arctan2(np.imag(stft), np.real(stft))
+    magnitude = np.abs(stft)
+    cd_result = np.zeros_like(stft)
     # expected X
     cd_target = np.zeros_like(phase)
     # assume constant phase change
     cd_target[:, 1:] = 2 * phase[:, 1:] - phase[:, :-1]
     # take cd_target(phase) and add magnitude
-    cd_target = np.abs(stft) * np.exp(1j * cd_target)
-    # comp:lex spectrogram
-    stft[:, 1:] -= cd_target[:, :-1]
-    stft[:, 0] = 0
-    return aggregate(np.abs(stft), axis=0)
+    # note that target[n] is the expected stft of stft[n+1]
+    cd_target = magnitude * np.exp(1j * cd_target)
+    # complex spectrogram
+    # note that cd_target[0] == 0, so only [2:] is calculated
+    cd_result[:, 2:] = stft[:, 2:] - cd_target[:, 1:-1]
+    # rectify so that only onsets remain
+    if rectify:
+        cd_result[:, 1:] = cd_result[:, 1:] * (magnitude[:, 1:] > magnitude[:, :-1])
+    # take norm and aggregate
+    return aggregate(np.abs(cd_result), axis=0)
 
 
 def _tone_frequencies(band_per_octave, f_min=27.5, f_max=17000, initial_freq=440):
@@ -283,5 +294,20 @@ def _main():
     plt.show()
 
 
+def test_cd():
+    boeck = datasets.BockSet()
+    splits = boeck.splits
+    key = splits[0][0]
+    piece = boeck.get_piece(key)
+    wave, onsets, sr = piece.get_data()
+    # wave, sr = librosa.load("music/yoake.wav", sr=44100)
+
+    stft = librosa.stft(wave, n_fft=2048, hop_length=441, center=False)
+    cd = complex_domain_odf(stft, rectify=False)
+    rcd = complex_domain_odf(stft, rectify=True)
+    onset_frames = librosa.samples_to_frames(onsets, 441, n_fft=2048)
+    utils.plot_odf(cd[200:400], title="CD")
+    utils.plot_odf(rcd[200:400], title="RCD")
+
 if __name__ == '__main__':
-    _main()
+    test_cd()

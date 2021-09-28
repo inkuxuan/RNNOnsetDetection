@@ -213,6 +213,10 @@ class BockSet(object):
             return self.sr
 
         def get_data(self):
+            r"""
+
+            :return: (wave, onset_in_samples, sampling_rate)
+            """
             return self.get_wave(), self.get_onsets(), self.get_sr()
 
 
