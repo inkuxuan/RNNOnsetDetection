@@ -11,6 +11,7 @@ from datetime import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor
 from itertools import repeat
+import multiprocessing
 
 import librosa
 import numpy as np
@@ -23,7 +24,7 @@ N_FFT = 2048
 HOP_SIZE = 441
 ONSET_DELTA = 0.030
 # Number of cores in CPU, used to multithreading in Onset Detection Function calculations
-CPU_CORES = 6
+CPU_CORES = multiprocessing.cpu_count()
 
 
 def get_sets(splits, test_split_index) -> tuple[list, list, list]:
@@ -124,8 +125,8 @@ class BoeckDataLoader(object):
         while index < data_size:
             # current batch size
             b_size = self.batch_size
-            if index + b_size >= data_size:
-                b_size = data_size - index - 1
+            if index + b_size > data_size:
+                b_size = data_size - index
             end_index = index + b_size
             keys = self.training_set[index:end_index]
 
@@ -137,7 +138,7 @@ class BoeckDataLoader(object):
                 odfs_list = results[1]
                 target_list = results[2]
                 audio_in_seconds = results[4]
-            maxlen=np.max(lengths)
+            maxlen = np.max(lengths)
             total_audio_length = np.sum(audio_in_seconds)
 
             # resize (pad zeros) ndarrays to form a batch
@@ -317,7 +318,7 @@ def test_output():
 def test_prepare_data():
     boeck_set = datasets.BockSet()
     splits = boeck_set.splits
-    features = ['super_flux', 'complex_domain']
+    features = ['super_flux', 'rcd']
     for i in range(len(splits[0])):
         t0 = time.perf_counter()
         length, odfs, target, onset_seconds, audio_len = prepare_data(boeck_set, features, splits[0][i])
@@ -331,13 +332,15 @@ def test_data_loader():
     training_set, _, _ = get_sets(boeck.splits, 0)
     loader = BoeckDataLoader(boeck, training_set, batch_size)
     t0 = time.perf_counter()
-    v_in, target, total_len = next(loader.generate_data())
+    audio_length = 0
+    v_in = None
+    target = None
+    for v_in, target, total_len in loader.generate_data():
+        audio_length += total_len
     t1 = time.perf_counter()
     print("Input array shape:", v_in.shape)
     print("Target array shape: ", target.shape)
-    print("Time elapsed: ", (t1-t0), ", Speed: ", total_len/(t1-t0), "x")
-    assert v_in.shape[0] == batch_size
-    assert target.shape[0] == batch_size
+    print("Time elapsed: ", (t1 - t0), ", Speed: ", audio_length / (t1 - t0), "x")
 
 
 if __name__ == '__main__':
