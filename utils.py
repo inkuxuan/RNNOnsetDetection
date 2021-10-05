@@ -43,7 +43,7 @@ def plot_odf(odf, title="ODF", onset_target=None, onsets=None):
     fig = plt.figure()
     plt.plot(odf)
     if onset_target is not None:
-        plt.plot(onset_target)
+        plt.plot(onset_target, color='red', alpha=0.3)
     if onsets is not None:
         for x in onsets:
             plt.axvline(x=x, color='red', alpha=0.3)

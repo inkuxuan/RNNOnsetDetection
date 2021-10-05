@@ -38,7 +38,7 @@ class SingleOutRNN(nn.Module):
     An RNN followed by a single output unit (sigmoid activation)
     """
 
-    def __init__(self, input_size, hidden_size, num_layers, nonlinearity='tanh', bidirectional=False, sigmoid=True,
+    def __init__(self, input_size, hidden_size, num_layers, nonlinearity='tanh', bidirectional=False, sigmoid=False,
                  dtype=torch.float):
         super().__init__()
         self.input_size = input_size

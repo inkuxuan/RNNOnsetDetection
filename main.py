@@ -1,5 +1,7 @@
 import random
 
+import numpy
+
 import boeck.onset_program
 import datasets
 import networks
@@ -27,20 +29,6 @@ ONSET_DELTA = 0.030
 CPU_CORES = multiprocessing.cpu_count()
 
 
-def get_sets(splits, test_split_index) -> tuple[list, list, list]:
-    splits = splits.copy()
-    # setup training set, validation set, test set
-    test_set_keys = splits.pop(test_split_index)
-    # set the first one as validation set
-    validation_set_keys = splits.pop(0)
-    # flatten the training set
-    training_set_keys = []
-    for sublist in splits:
-        for item in sublist:
-            training_set_keys.append(item)
-    return training_set_keys, validation_set_keys, test_set_keys
-
-
 def get_features(wave, features=None, n_fft=2048, hop_size=440, sr=44100, center=False) -> np.ndarray:
     r"""
     :param wave: audio wave
@@ -64,41 +52,39 @@ def get_features(wave, features=None, n_fft=2048, hop_size=440, sr=44100, center
     return np.asarray(f)
 
 
-def validation(boeck_set, validation_set, model, features) -> Counter:
-    with torch.no_grad():
-        for key in validation_set:
-            predictions = get_model_output(boeck_set, key, model, features)
-            # TODO peak picking for prediction function
-            # boeck.onset_evaluation.count_errors()
-    return None
-
-
-def get_model_output(boeck_set, key, model, features, verbose=False):
+def prepare_data(boeck_set, features, key, normalize=True):
     r"""
-    NOTICE RETURN VALUE
+    Notice that odfs is in shape (length, n_features), target is in shape (length)
 
-    :return: (prediction, hidden_state)
+    :return: length(frames), onset_detection_function_values, target_values, onset_list_in_seconds, audio_length_sec
     """
-    with torch.no_grad():
-        t0 = time.perf_counter()
-        length, odfs, target, onset_seconds, audio_len = prepare_data(boeck_set, features, key)
-        t1 = time.perf_counter()
-        if verbose:
-            print(f"Data preparation ({t1 - t0})")
-        input_array = np.expand_dims(odfs, axis=0)
-        input_array = torch.from_numpy(input_array).to(device=networks.device).type(model.dtype)
-        t2 = time.perf_counter()
-        if verbose:
-            print(f"Tensor conversion ({t2 - t1})")
-        out = model(input_array)
-        t3 = time.perf_counter()
-        if verbose:
-            print(f"Prediction ({t3 - t2})")
-            print(f"Audio {audio_len:.1f}sec, speed {audio_len / (t3 - t0):.1f}x")
-    return out
+    piece = boeck_set.get_piece(key)
+    wave, onsets_list, sr = piece.get_data()
+    onset_seconds = boeck.onset_evaluation.combine_events(piece.get_onsets_seconds(), ONSET_DELTA)
+    onsets_list = np.asarray(onset_seconds) * sr
+    odfs = get_features(wave, n_fft=N_FFT, hop_size=HOP_SIZE, sr=sr, center=False, features=features)
+    length = odfs.shape[1]
+    # Normalize the odfs so that they range from 0 to 1
+    if normalize:
+        for i in range(len(odfs)):
+            max_value = np.max(odfs[i, :])
+            odfs[i, :] = odfs[i, :] / max_value
+
+    target = onsets.onset_list_to_target(onsets_list, HOP_SIZE, length, ONSET_DELTA * sr / HOP_SIZE, key=key,
+                                         mode='linear')
+
+    # arrange dimensions so that the model can accept (shape==[seq_len, n_feature])
+    odfs = odfs.T
+
+    return length, odfs, target, onset_seconds, len(wave) / sr
 
 
 class BoeckDataLoader(object):
+    r"""
+    DataLoader (Not PyTorch DataLoader) for Boeck Dataset.
+    Shuffle and minibatch implemented, concurrent ODF calculation within a batch.
+    No. of threads correspond to CPU core count.
+    """
 
     def __init__(self, boeck_set, training_set_keys, batch_size, shuffle=True, features=None):
         self.boeck_set = boeck_set
@@ -116,7 +102,7 @@ class BoeckDataLoader(object):
         Note that total length is in seconds.
         Input array shape: (batch_size, max_length, n_features)
         Target shape: (batch_size, max_length)
-        max_length is the maximum length of all sequences in a batch
+        max_length is the maximum length (frames) of all sequences in a batch
         """
         if self.shuffle:
             self._shuffle()
@@ -150,169 +136,204 @@ class BoeckDataLoader(object):
             index = end_index
 
 
-def train_network(boeck_set, training_set, validation_set, model, loss_fn, optimizer,
-                  features=None):
-    r"""
+class ModelManager(object):
+    def __init__(self,
+                 boeck_set: datasets.BockSet,
+                 features=None,
+                 num_layer_unit=4,
+                 num_layers=2,
+                 nonlinearity='tanh',
+                 bidirectional=True,
+                 loss_fn=None,
+                 optimizer=None,
+                 scheduler=None):
+        r"""
 
+        :param features: list, element in ['rcd', 'cd', 'superflux']; default ['rcd', 'superflux']
+        :param num_layer_unit: Number of units in one hidden layer
+        :param num_layers: Number of hidden layers
+        :param loss_fn: default BCEWithLogitsLoss
+        :param optimizer: default SGD
+        :param scheduler: default milestone scheduler. Set to False to disable scheduler
+        """
+        self.boeck_set = boeck_set
+        self.features = features
+        if self.features is None:
+            self.features = ['rcd', 'superflux']
+        self.model = networks.SingleOutRNN(
+            len(self.features),
+            num_layer_unit,
+            num_layers,
+            nonlinearity=nonlinearity,
+            bidirectional=bidirectional,
+            sigmoid=False
+        ).to(networks.device)
+        self.loss_fn = loss_fn
+        if self.loss_fn is None:
+            self.loss_fn = nn.BCEWithLogitsLoss()
+        self.optimizer = optimizer
+        if self.optimizer is None:
+            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.6)
+        self.scheduler = scheduler
+        if self.scheduler is None:
+            self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=[30, 40, 50], gamma=0.15)
 
-    ------
-    :param features: Feature functions
-    :return: Counter in validation set
-    """
+    def save(self, filename=None):
+        if filename is None:
+            now = datetime.now()
+            dstr = now.strftime("%Y-%m-%d %H%M%S")
+            filename = 'model-' + dstr + '.pt'
+        torch.save(self.model, filename)
 
-    # epoch
-    continue_epoch = True
-    i = 0
-    while continue_epoch:
-        i += 1
-        for key_index in range(len(training_set)):
+    def predict(self,
+                key=None,
+                wave=None,
+                hop_size=441,
+                n_fft=2048,
+                sr=441000,
+                verbose=False,
+                sigmoid=True):
+        r"""
+        Specify either key or wave
+        if wave is specified, hop_size, n_fft, sr is used
+
+        :return: raw network output if sigmoid=False
+        """
+        with torch.no_grad():
             t0 = time.perf_counter()
-
-            key = training_set[key_index]
-            # preparing data
-            length, odfs, target, _, audio_len = prepare_data(boeck_set, features, key)
-            # training model
-            # input shape: (batch_size, length, n_feature)
-            # output shape: (batch_size, length)
-            input_array = np.expand_dims(odfs, axis=0)
-
-            input_array = torch.from_numpy(input_array).to(device=networks.device).type(model.dtype)
-            target = torch.from_numpy(target).to(device=networks.device).type(model.dtype)
-
-            prediction, _ = model(input_array)
-
-            loss = loss_fn(prediction.squeeze(), target)
-            # back propagation
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
+            if key is not None:
+                _, odfs, _, _, audio_len = prepare_data(self.boeck_set, self.features, key)
+            elif wave is not None:
+                odfs = get_features(wave, self.features, hop_size=hop_size, n_fft=n_fft, sr=sr)
+                audio_len = len(wave) / float(sr)
+            else:
+                raise ValueError("either a key or a wave array should be specified")
             t1 = time.perf_counter()
-            print(
-                f"{key} ({audio_len:.1f}s), speed {(audio_len / (t1 - t0)):.1f}x, {key_index + 1}/{len(training_set)}, "
-                f"epoch {i}")
-            print(f"loss: {loss.item():>7f}")
-            if loss.item() <= 0.05 or i >= 10:
-                continue_epoch = False
+            if verbose:
+                print(f"Data preparation ({t1 - t0})")
+            input_array = np.expand_dims(odfs, axis=0)
+            input_array = torch.from_numpy(input_array).to(device=networks.device).type(self.model.dtype)
+            t2 = time.perf_counter()
+            if verbose:
+                print(f"Tensor conversion ({t2 - t1})")
+            out, _ = self.model(input_array)
+            if sigmoid:
+                out = torch.sigmoid(out)
+            t3 = time.perf_counter()
+            if verbose:
+                print(f"Prediction ({t3 - t2})")
+                print(f"Audio {audio_len:.1f}sec, speed {audio_len / (t3 - t0):.1f}x")
+        return out
 
-    # validation
-    # TODO validation
-    # validation(boeck_set, validation_set, model, features)
-    continue_epoch = False
+    def generate_splits(self, test_split_index) -> tuple[list, list, list]:
+        r"""
+        :return: (training_set_keys, validation_set_keys, test_set_keys)
+        """
+        splits = self.boeck_set.splits.copy()
+        # setup training set, validation set, test set
+        test_set_keys = splits.pop(test_split_index)
+        # set the first one as validation set
+        validation_set_keys = splits.pop(0)
+        # flatten the training set
+        training_set_keys = []
+        for sublist in splits:
+            for item in sublist:
+                training_set_keys.append(item)
+        return training_set_keys, validation_set_keys, test_set_keys
 
+    def train_on_split(self,
+                       training_keys: list,
+                       validation_keys: list,
+                       batch_size=CPU_CORES,
+                       verbose=False,
+                       debug_max_epoch_count=None,
+                       debug_min_loss=None):
+        r"""
+        Train the network on a specific training set and validation set
 
-def prepare_data(boeck_set, features, key, normalize=True):
-    r"""
-    Notice that odfs is in shape (length, n_features), target is in shape (length)
+        -----
+        :param batch_size: How many pieces at a time to train the network.
+        Training process uses concurrency for both pre-processing and training. This is default the cores count of CPU.
+        :param verbose: bool, Print debug outputs
+        :param weighting: bool, whether to weight positive class dynamically. This often result in high loss.
+        :return:
+        """
+        loader = BoeckDataLoader(self.boeck_set, training_keys, batch_size, features=self.features)
+        continue_epoch = True
+        # TODO validation
+        epochs_without_improvement = 0
+        epoch = 0
+        while continue_epoch:
+            epoch += 1
+            print(f"===EPOCH {epoch}===")
+            if self.scheduler:
+                print(f"lr={self.scheduler.get_lr()}")
+            if verbose:
+                last_time = time.perf_counter()
+            for v_in, target, total_len in loader.generate_data():
+                v_in = torch.from_numpy(v_in).to(device=networks.device).type(self.model.dtype)
+                target = torch.from_numpy(target).to(device=networks.device).type(self.model.dtype)
+                prediction, _ = self.model(v_in)
+                loss = self.loss_fn(prediction.squeeze(dim=2), target)
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+                if self.scheduler:
+                    self.scheduler.step()
 
-    :return: length(frames), onset_detection_function_values, target_values, onset_list_in_seconds, audio_length_sec
-    """
-    piece = boeck_set.get_piece(key)
-    wave, onsets_list, sr = piece.get_data()
-    onset_seconds = boeck.onset_evaluation.combine_events(piece.get_onsets_seconds(), ONSET_DELTA)
-    onsets_list = np.asarray(onset_seconds) * sr
-    odfs = get_features(wave, n_fft=N_FFT, hop_size=HOP_SIZE, sr=sr, center=False, features=features)
-    length = odfs.shape[1]
-    # Normalize the odfs so that they range from 0 to 1
-    if normalize:
-        for i in range(len(odfs)):
-            max_value = np.max(odfs[i, :])
-            odfs[i, :] = odfs[i, :] / max_value
+                if verbose:
+                    now = time.perf_counter()
+                    # noinspection PyUnboundLocalVariable
+                    print(f"{now - last_time:.1f}s {total_len / (now - last_time):.1f}x in epoch {epoch}")
+                    print(f"loss: {loss.item():>7f}")
+                    last_time = now
+                if ((debug_min_loss and loss.item() <= debug_min_loss)
+                        or (debug_max_epoch_count and epoch >= debug_max_epoch_count)):
+                    continue_epoch = False
 
-    target = onsets.onset_list_to_target(onsets_list, HOP_SIZE, length, ONSET_DELTA * sr / HOP_SIZE, key=key,
-                                         mode='linear')
-
-    # arrange dimensions so that the model can accept (shape==[seq_len, n_feature])
-    odfs = odfs.T
-
-    return length, odfs, target, onset_seconds, len(wave) / sr
-
-
-def train_and_test(boeck_set, splits, test_split_index,
-                   num_layers=2, num_layer_unit=4,
-                   strategy='softmax',
-                   learning_rate=0.1,
-                   features=None):
-    if features is None:
-        features = ['complex_domain', 'super_flux']
-    counter = Counter()
-    training_set, validation_set, test_set = get_sets(splits, test_split_index)
-    # TODO implementing other strategies
-    assert strategy == 'softmax'
-    # input: superflux + cd (for now)
-    rnn = networks.SingleOutRNN(len(features), num_layer_unit, num_layers).to(networks.device)
-    loss_fn = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(rnn.parameters(), lr=learning_rate)
-    train_network(boeck_set, training_set, validation_set, rnn, loss_fn, optimizer,
-                  features=features)
-    # TODO test network
-    return rnn
-
-
-def main():
-    boeck_set = datasets.BockSet()
-    splits = boeck_set.splits
-    for i in range(len(splits)):
-        # test once treating each split as a test set
-        train_and_test(boeck_set, splits, i)
+    def train_and_test(self, test_split_index, verbose=False, **kwargs):
+        training_keys, validation_keys, test_keys = self.generate_splits(test_split_index)
+        self.train_on_split(training_keys, validation_keys, verbose=verbose, **kwargs)
+        # TODO test (evaluation codes)
 
 
 def test_network_training():
     print(f"device: {networks.device}")
+    print(f"cpu {CPU_CORES} cores")
     boeck_set = datasets.BockSet()
-    splits = boeck_set.splits
-    features = ['super_flux', 'complex_domain']
-    model = networks.SingleOutRNN(len(features), 4, 2, sigmoid=False, bidirectional=True).to(networks.device)
+    trainer = ModelManager(boeck_set, bidirectional=True)
+    splits = trainer.boeck_set.splits
+    trainer.loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(12))
+    trainer.train_on_split(splits[1], [], debug_max_epoch_count=50, verbose=True)
 
-    frame_rate = 44100 / HOP_SIZE
-    loss_fn = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.3)
+    test_key = splits[0][0]
 
-    output, hidden = get_model_output(boeck_set, splits[0][0], model, features)
-    output = torch.sigmoid(output)
-    output = output.squeeze()
-    output = output.T
-    output = output.cpu()
-    utils.plot_odf(output, title="Network(RAW)")
-
-    train_network(boeck_set, splits[0], None, model, loss_fn, optimizer,
-                  features=features)
-
-    # piece = boeck_set.get_piece(splits[0][0])
-    # wave, _, sr = piece.get_data()
-    # stft = librosa.stft(wave, N_FFT, HOP_SIZE, center=False)
-    # super_flux, _, _ = odf.super_flux_odf(stft, sr, N_FFT, HOP_SIZE)
-
-    output, _ = get_model_output(boeck_set, splits[0][0], model, features)
-    output = torch.sigmoid(output)
+    output = trainer.predict(key=test_key)
     output = output.squeeze()
     output = output.T
     output = output.cpu()
     utils.plot_odf(output, title="Network(Trained)")
 
-    length, odfs, target, onset_seconds, audio_len = prepare_data(boeck_set, features, splits[0][0])
+    length, odfs, target, onset_seconds, audio_len = prepare_data(boeck_set, trainer.features, test_key)
     utils.plot_odf(odfs, title="SuperFlux")
     utils.plot_odf(target, title="Target")
 
-    now = datetime.now()
-    dstr = now.strftime("%Y-%m-%d %H%M%S")
-    torch.save(model, 'model-' + dstr + '.pt')
+    trainer.save()
 
     # print(hidden)
 
 
 def test_output():
     boeck_set = datasets.BockSet()
+
     t0 = time.perf_counter()
-    model = networks.SingleOutRNN(2, 4, 2).to(networks.device)
+    mgr = ModelManager(boeck_set)
     t1 = time.perf_counter()
     print(f"Network initialized ({t1 - t0})")
-    prediction, _ = get_model_output(boeck_set, boeck_set.get_split(0)[0], model,
-                                     ['complex_domain', 'super_flux'],
-                                     verbose=True)
+    prediction = mgr.predict(boeck_set.splits[0][0], verbose=True)
+
     print(prediction.shape)
-    print(next(model.parameters()).is_cuda)
-    print(prediction.is_cuda)
+    print("CUDA ", prediction.is_cuda)
 
 
 def test_prepare_data():
@@ -329,7 +350,8 @@ def test_prepare_data():
 def test_data_loader():
     batch_size = 8
     boeck = datasets.BockSet()
-    training_set, _, _ = get_sets(boeck.splits, 0)
+    mgr = ModelManager(boeck)
+    training_set, _, _ = mgr.generate_splits(2)
     loader = BoeckDataLoader(boeck, training_set, batch_size)
     t0 = time.perf_counter()
     audio_length = 0
@@ -337,11 +359,19 @@ def test_data_loader():
     target = None
     for v_in, target, total_len in loader.generate_data():
         audio_length += total_len
+        break
     t1 = time.perf_counter()
     print("Input array shape:", v_in.shape)
     print("Target array shape: ", target.shape)
     print("Time elapsed: ", (t1 - t0), ", Speed: ", audio_length / (t1 - t0), "x")
+    odf = v_in[0, :, :]
+    target = target[0, :]
+    if odf.shape[0] > 500:
+        odf = odf[:500, :]
+        target = target[:500]
+    print(f"shape plot: {odf.shape}, {target.shape}")
+    utils.plot_odf(odf, onset_target=target)
 
 
 if __name__ == '__main__':
-    test_data_loader()
+    test_network_training()
