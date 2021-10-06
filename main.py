@@ -181,8 +181,13 @@ class ModelManager(object):
     def save(self, filename=None):
         if filename is None:
             now = datetime.now()
-            dstr = now.strftime("%Y-%m-%d %H%M%S")
-            filename = 'model-' + dstr + '.pt'
+            dstr = now.strftime("%Y%m%d %H%M%S")
+            filename = 'mdl_' + dstr
+            filename += '_' + self.model.recurrent.nonlinearity
+            filename += '_' + self.model.num_layers + 'x' + self.model.hidden_size
+            if self.model.recurrent.bidirectional:
+                filename += '(bi)'
+            filename += '.pt'
         torch.save(self.model, filename)
 
     def predict(self,
@@ -278,8 +283,6 @@ class ModelManager(object):
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-                if self.scheduler:
-                    self.scheduler.step()
 
                 if verbose:
                     now = time.perf_counter()
@@ -290,6 +293,8 @@ class ModelManager(object):
                 if ((debug_min_loss and loss.item() <= debug_min_loss)
                         or (debug_max_epoch_count and epoch >= debug_max_epoch_count)):
                     continue_epoch = False
+            if self.scheduler:
+                self.scheduler.step()
 
     def train_and_test(self, test_split_index, verbose=False, **kwargs):
         training_keys, validation_keys, test_keys = self.generate_splits(test_split_index)
