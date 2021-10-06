@@ -309,7 +309,11 @@ def test_network_training():
     trainer = ModelManager(boeck_set, bidirectional=True)
     splits = trainer.boeck_set.splits
     trainer.loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(12))
-    trainer.train_on_split(splits[1], [], debug_max_epoch_count=50, verbose=True)
+    trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.6)
+    trainer.scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        trainer.optimizer,
+        milestones=[50, 150, 250], gamma=0.15)
+    trainer.train_on_split(splits[1], [], debug_max_epoch_count=350, verbose=True)
 
     test_key = splits[0][0]
 
