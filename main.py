@@ -13,7 +13,7 @@ from datetime import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor
 from itertools import repeat
-import os
+import multiprocessing
 
 import librosa
 import numpy as np
@@ -22,11 +22,14 @@ import torch.optim
 import boeck.onset_evaluation
 from boeck.onset_evaluation import Counter
 
+# Number of cores in CPU
+CPU_CORES = multiprocessing.cpu_count()
+CACHED_PREPROCESSING = True
+
 N_FFT = 2048
 HOP_SIZE = 441
 ONSET_DELTA = 0.030
-# Number of cores in CPU, used to multithreading in Onset Detection Function calculations
-CPU_CORES = len(os.sched_getaffinity(0))
+TARGET_MODE = 'single'
 
 
 def get_features(wave, features=None, n_fft=2048, hop_size=440, sr=44100, center=False) -> np.ndarray:
@@ -36,7 +39,7 @@ def get_features(wave, features=None, n_fft=2048, hop_size=440, sr=44100, center
     :return: ndarray, axis 0 being feature type, axis 1 being the length of a sequence
     """
     if features is None:
-        features = ['complex_domain', 'super_flux']
+        features = ['rcd', 'superflux']
     stft = librosa.stft(wave, n_fft=n_fft, hop_length=hop_size, center=center)
     f = []
     for feature in features:
@@ -52,6 +55,10 @@ def get_features(wave, features=None, n_fft=2048, hop_size=440, sr=44100, center
     return np.asarray(f)
 
 
+odfs_cache = {}
+features_cache = {}
+
+
 def prepare_data(boeck_set, features, key, normalize=True):
     r"""
     Notice that odfs is in shape (length, n_features), target is in shape (length)
@@ -62,7 +69,13 @@ def prepare_data(boeck_set, features, key, normalize=True):
     wave, onsets_list, sr = piece.get_data()
     onset_seconds = boeck.onset_evaluation.combine_events(piece.get_onsets_seconds(), ONSET_DELTA)
     onsets_list = np.asarray(onset_seconds) * sr
-    odfs = get_features(wave, n_fft=N_FFT, hop_size=HOP_SIZE, sr=sr, center=False, features=features)
+    # load from cache if available (check if feature type matches)
+    if CACHED_PREPROCESSING and (odfs_cache.get(key) is not None) and (features_cache.get(key) == features):
+        odfs = odfs_cache[key]
+    else:
+        odfs = get_features(wave, n_fft=N_FFT, hop_size=HOP_SIZE, sr=sr, center=False, features=features)
+        odfs_cache[key] = odfs
+        features_cache[key] = features
     length = odfs.shape[1]
     # Normalize the odfs so that they range from 0 to 1
     if normalize:
@@ -71,7 +84,7 @@ def prepare_data(boeck_set, features, key, normalize=True):
             odfs[i, :] = odfs[i, :] / max_value
 
     target = onsets.onset_list_to_target(onsets_list, HOP_SIZE, length, ONSET_DELTA * sr / HOP_SIZE, key=key,
-                                         mode='linear')
+                                         mode=TARGET_MODE)
 
     # arrange dimensions so that the model can accept (shape==[seq_len, n_feature])
     odfs = odfs.T
@@ -86,12 +99,18 @@ class BoeckDataLoader(object):
     No. of threads correspond to CPU core count.
     """
 
-    def __init__(self, boeck_set, training_set_keys, batch_size, shuffle=True, features=None):
+    def __init__(self, boeck_set, training_set_keys, batch_size, shuffle=True, features=None, target_mode='single'):
+        r"""
+
+        :param batch_size: size of each minibatch, default is the available core count of CPU
+        :param shuffle: bool, whether to shuffle for each epoch
+        """
         self.boeck_set = boeck_set
         self.training_set = training_set_keys
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.features = features
+        self.target_mode = target_mode
 
     def _shuffle(self):
         random.shuffle(self.training_set)
@@ -183,8 +202,8 @@ class ModelManager(object):
             now = datetime.now()
             dstr = now.strftime("%Y%m%d %H%M%S")
             filename = 'mdl_' + dstr
-            filename += '_' + self.model.recurrent.nonlinearity
-            filename += '_' + self.model.num_layers + 'x' + self.model.hidden_size
+            filename += '_' + str(self.model.recurrent.nonlinearity)
+            filename += '_' + str(self.model.num_layers) + 'x' + str(self.model.hidden_size)
             if self.model.recurrent.bidirectional:
                 filename += '(bi)'
             filename += '.pt'
@@ -349,10 +368,9 @@ def test_output():
 def test_prepare_data():
     boeck_set = datasets.BockSet()
     splits = boeck_set.splits
-    features = ['super_flux', 'rcd']
     for i in range(len(splits[0])):
         t0 = time.perf_counter()
-        length, odfs, target, onset_seconds, audio_len = prepare_data(boeck_set, features, splits[0][i])
+        length, odfs, target, onset_seconds, audio_len = prepare_data(boeck_set, None, splits[0][i])
         t1 = time.perf_counter()
         print(f"{audio_len:.2f}s, elapsed {t1 - t0:.2f}, {audio_len / (t1 - t0):.1f}x speed")
 
