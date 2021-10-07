@@ -1,6 +1,5 @@
+import math
 import random
-
-import numpy
 
 import boeck.onset_program
 import datasets
@@ -14,6 +13,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from itertools import repeat
 import multiprocessing
+import psutil
+import gc
 
 import librosa
 import numpy as np
@@ -22,14 +23,22 @@ import torch.optim
 import boeck.onset_evaluation
 from boeck.onset_evaluation import Counter
 
+# ---------------CONFIGURATIONS----------------
+
 # Number of cores in CPU
 CPU_CORES = multiprocessing.cpu_count()
+# If enabled, all the odf preprocessing result will be cached in MEMORY
+# Recommend turning on if more than 8GB RAM is AVAILABLE
+# If not enough RAM is available, the program will likely just crash
 CACHED_PREPROCESSING = True
+
+# ---------------META PARAMETERS----------------
 
 N_FFT = 2048
 HOP_SIZE = 441
 ONSET_DELTA = 0.030
-TARGET_MODE = 'single'
+TARGET_MODE = 'linear'
+FEATURES = ['rcd', 'superflux']
 
 
 def get_features(wave, features=None, n_fft=2048, hop_size=440, sr=44100, center=False) -> np.ndarray:
@@ -59,7 +68,7 @@ odfs_cache = {}
 features_cache = {}
 
 
-def prepare_data(boeck_set, features, key, normalize=True):
+def prepare_data(boeck_set, features, key):
     r"""
     Notice that odfs is in shape (length, n_features), target is in shape (length)
 
@@ -71,24 +80,25 @@ def prepare_data(boeck_set, features, key, normalize=True):
     onsets_list = np.asarray(onset_seconds) * sr
     # load from cache if available (check if feature type matches)
     if CACHED_PREPROCESSING and (odfs_cache.get(key) is not None) and (features_cache.get(key) == features):
+        # retrieve from cached (already transposed and normalised)
         odfs = odfs_cache[key]
     else:
         odfs = get_features(wave, n_fft=N_FFT, hop_size=HOP_SIZE, sr=sr, center=False, features=features)
-        odfs_cache[key] = odfs
-        features_cache[key] = features
-    length = odfs.shape[1]
-    # Normalize the odfs so that they range from 0 to 1
-    if normalize:
-        for i in range(len(odfs)):
-            max_value = np.max(odfs[i, :])
-            odfs[i, :] = odfs[i, :] / max_value
-
+        # arrange dimensions so that the model can accept (shape==[seq_len, n_feature])
+        odfs = odfs.T
+        # Normalize the odfs along each feature so that they range from 0 to 1
+        for i in range(odfs.shape[1]):
+            max_value = np.max(odfs[:, i])
+            odfs[:, i] = odfs[:, i] / max_value
+        if CACHED_PREPROCESSING:
+            # save transposed odfs
+            odfs_cache[key] = odfs
+            features_cache[key] = features
+            # Prevent from memory overflowing
+            gc.collect()
+    length = odfs.shape[0]
     target = onsets.onset_list_to_target(onsets_list, HOP_SIZE, length, ONSET_DELTA * sr / HOP_SIZE, key=key,
                                          mode=TARGET_MODE)
-
-    # arrange dimensions so that the model can accept (shape==[seq_len, n_feature])
-    odfs = odfs.T
-
     return length, odfs, target, onset_seconds, len(wave) / sr
 
 
@@ -279,7 +289,6 @@ class ModelManager(object):
         :param batch_size: How many pieces at a time to train the network.
         Training process uses concurrency for both pre-processing and training. This is default the cores count of CPU.
         :param verbose: bool, Print debug outputs
-        :param weighting: bool, whether to weight positive class dynamically. This often result in high loss.
         :return:
         """
         loader = BoeckDataLoader(self.boeck_set, training_keys, batch_size, features=self.features)
@@ -287,6 +296,7 @@ class ModelManager(object):
         # TODO validation
         epochs_without_improvement = 0
         epoch = 0
+        loss_record = []
         while continue_epoch:
             epoch += 1
             print(f"===EPOCH {epoch}===")
@@ -303,6 +313,8 @@ class ModelManager(object):
                 loss.backward()
                 self.optimizer.step()
 
+                loss_record.append(loss.item())
+
                 if verbose:
                     now = time.perf_counter()
                     # noinspection PyUnboundLocalVariable
@@ -314,38 +326,51 @@ class ModelManager(object):
                     continue_epoch = False
             if self.scheduler:
                 self.scheduler.step()
+        return loss_record
 
     def train_and_test(self, test_split_index, verbose=False, **kwargs):
         training_keys, validation_keys, test_keys = self.generate_splits(test_split_index)
-        self.train_on_split(training_keys, validation_keys, verbose=verbose, **kwargs)
+        return self.train_on_split(training_keys, validation_keys, verbose=verbose, **kwargs)
         # TODO test (evaluation codes)
 
 
 def test_network_training():
     print(f"device: {networks.device}")
     print(f"cpu {CPU_CORES} cores")
+
+    # configure
     boeck_set = datasets.BockSet()
     trainer = ModelManager(boeck_set, bidirectional=True)
     splits = trainer.boeck_set.splits
-    trainer.loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(12))
-    trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.6)
+    # initialize
+    trainer.features = FEATURES
+    trainer.loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(3))
+    trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.5)
     trainer.scheduler = torch.optim.lr_scheduler.MultiStepLR(
         trainer.optimizer,
-        milestones=[50, 150, 250], gamma=0.15)
-    trainer.train_and_test(0, debug_max_epoch_count=350, verbose=True)
-    # trainer.train_on_split(splits[1], [], debug_max_epoch_count=350, verbose=True)
+        milestones=[30, 230, 430], gamma=0.2)
 
+    # training
+    loss = trainer.train_and_test(0, debug_max_epoch_count=700, verbose=True, batch_size=64)
+    # loss = trainer.train_on_split(splits[1], [], debug_max_epoch_count=430, verbose=True, batch_size=64)
+
+    # testing
     test_key = splits[0][0]
+    piece = boeck_set.get_piece(test_key)
+    onset_seconds = boeck.onset_evaluation.combine_events(piece.get_onsets_seconds(), ONSET_DELTA)
+    onsets_list = np.asarray(onset_seconds) * 44100
+    onsets_list = onsets_list / HOP_SIZE
 
     output = trainer.predict(key=test_key)
     output = output.squeeze()
     output = output.T
     output = output.cpu()
-    utils.plot_odf(output, title="Network(Trained)")
+    utils.plot_odf(output, title="Network(Trained)", onsets=onsets_list)
 
     length, odfs, target, onset_seconds, audio_len = prepare_data(boeck_set, trainer.features, test_key)
     utils.plot_odf(odfs, title="SuperFlux")
     utils.plot_odf(target, title="Target")
+    utils.plot_loss(loss)
 
     trainer.save()
 
