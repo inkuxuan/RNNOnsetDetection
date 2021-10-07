@@ -40,13 +40,19 @@ def plot_odf(odf, title="ODF", onset_target=None, onsets=None):
     :param onsets: Onsets, in list of frame numbers, will be plotted as vertical lines
     :return:
     """
-    fig = plt.figure()
     plt.plot(odf)
     if onset_target is not None:
         plt.plot(onset_target, color='red', alpha=0.3)
     if onsets is not None:
         for x in onsets:
             plt.axvline(x=x, color='red', alpha=0.3)
+    plt.title(title)
+    plt.show()
+
+
+def plot_loss(loss, title="Loss"):
+    plt.plot(loss)
+    plt.xlabel("minibatch")
     plt.title(title)
     plt.show()
 
