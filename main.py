@@ -13,7 +13,7 @@ from datetime import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor
 from itertools import repeat
-import multiprocessing
+import os
 
 import librosa
 import numpy as np
@@ -26,7 +26,7 @@ N_FFT = 2048
 HOP_SIZE = 441
 ONSET_DELTA = 0.030
 # Number of cores in CPU, used to multithreading in Onset Detection Function calculations
-CPU_CORES = multiprocessing.cpu_count()
+CPU_CORES = len(os.sched_getaffinity(0))
 
 
 def get_features(wave, features=None, n_fft=2048, hop_size=440, sr=44100, center=False) -> np.ndarray:
@@ -313,7 +313,8 @@ def test_network_training():
     trainer.scheduler = torch.optim.lr_scheduler.MultiStepLR(
         trainer.optimizer,
         milestones=[50, 150, 250], gamma=0.15)
-    trainer.train_on_split(splits[1], [], debug_max_epoch_count=350, verbose=True)
+    trainer.train_and_test(0, debug_max_epoch_count=350, verbose=True)
+    # trainer.train_on_split(splits[1], [], debug_max_epoch_count=350, verbose=True)
 
     test_key = splits[0][0]
 
