@@ -407,6 +407,52 @@ class ModelManager(object):
         return count
 
 
+def main(weight, init_lr, step_size, gamma, epoch, batch_size, features=FEATURES):
+    print(f"device: {networks.device}")
+    print(f"cpu {CPU_CORES} cores")
+
+    # configure
+    boeck_set = datasets.BockSet()
+    trainer = ModelManager(boeck_set, bidirectional=True)
+    splits = trainer.boeck_set.splits
+    # initialize
+    trainer.features = features
+    trainer.loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(weight))
+    trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=init_lr)
+    trainer.scheduler = torch.optim.lr_scheduler.StepLR(trainer.optimizer,
+                                                        step_size, gamma=gamma)
+
+    # training
+    loss, count = trainer.train_and_test(0, debug_max_epoch_count=epoch, verbose=True, batch_size=batch_size)
+    print(f"Precision:{count.precision:.5f}, Recall:{count.recall:.5f}, F-score:{count.fmeasure:.5f}")
+    print(f"TP:{count.tp}, FP:{count.fp}, FN:{count.fn}")
+
+    # testing
+    test_output(trainer, splits[0][0])
+    utils.plot_loss(loss)
+
+    trainer.save()
+
+    # report
+    now = datetime.now()
+    dstr = now.strftime("%Y%m%d %H%M%S")
+    with open("Report "+dstr+".txt", 'w') as file:
+        file.write("Training and Test Report\r\n")
+        file.write("[Parameters]\r\n")
+        file.write(f"weight for positive: {weight}\r\n")
+        file.write(f"initial learning rate: {init_lr}\r\n")
+        file.write(f"scheduler step size: {step_size}\r\n")
+        file.write(f"scheduler gamma: {gamma}\r\n")
+        file.write(f"no. of epochs: {epoch}\r\n")
+        file.write(f"batch size: {batch_size}\r\n")
+        file.write(f"Features: {features}\r\n")
+        file.writelines([
+            f"[Scores]",
+            f"Precision:{count.precision:.5f}, Recall:{count.recall:.5f}, F-score:{count.fmeasure:.5f}",
+            f"TP:{count.tp}, FP:{count.fp}, FN:{count.fn}"
+        ])
+
+
 def test_network_training():
     print(f"device: {networks.device}")
     print(f"cpu {CPU_CORES} cores")
@@ -502,4 +548,9 @@ def test_data_loader():
 
 
 if __name__ == '__main__':
-    test_saved_model('mdl_20211008 004755_tanh_2x4(bi)_rcd+spf.pt')
+    main(3, 0.5, 50, 0.5, 1200, 64)
+    main(2, 0.5, 50, 0.5, 1200, 64)
+    main(1, 0.5, 50, 0.5, 1200, 64)
+    main(1, 0.5, 100, 0.5, 1200, 64)
+    main(3, 0.5, 50, 0.5, 1200, 64, features=['superflux'])
+    main(1, 0.5, 50, 0.5, 1200, 64, features=['superflux'])
