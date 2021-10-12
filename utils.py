@@ -40,6 +40,7 @@ def plot_odf(odf, title="ODF", onset_target=None, onsets=None):
     :param onsets: Onsets, in list of frame numbers, will be plotted as vertical lines
     :return:
     """
+    plt.figure(figsize=(14.4, 4.8), dpi=100)
     plt.plot(odf)
     if onset_target is not None:
         plt.plot(onset_target, color='red', alpha=0.3)

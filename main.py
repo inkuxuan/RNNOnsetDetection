@@ -15,6 +15,7 @@ import multiprocessing
 import gc
 
 import librosa
+import scipy.signal
 import numpy as np
 from torch import nn
 import torch.optim
@@ -32,14 +33,18 @@ CACHED_PREPROCESSING = True
 
 # ---------------META PARAMETERS----------------
 
+SAMPLING_RATE = 44100
 N_FFT = 2048
 HOP_SIZE = 441
 ONSET_DELTA = 0.030
 TARGET_MODE = 'linear'
 FEATURES = ['rcd', 'superflux']
+# in [boeck.onset_evaluation.combine_events, onsets.merge_onsets, None]
+# stands for combining onsets by average, by the first onset, and no combination
+COMBINE_ONSETS = onsets.merge_onsets
 
 
-def get_features(wave, features=None, n_fft=2048, hop_size=440, sr=44100, center=False) -> np.ndarray:
+def get_features(wave, features=None, n_fft=N_FFT, hop_size=HOP_SIZE, sr=SAMPLING_RATE, center=False) -> np.ndarray:
     r"""
     :param wave: audio wave
     :param features: list of features (str), in ['cd', 'rcd', 'superflux']
@@ -74,8 +79,10 @@ def prepare_data(boeck_set, features, key):
     """
     piece = boeck_set.get_piece(key)
     wave, onsets_list, sr = piece.get_data()
-    onset_seconds = boeck.onset_evaluation.combine_events(piece.get_onsets_seconds(), ONSET_DELTA)
-    onsets_list = np.asarray(onset_seconds) * sr
+    if COMBINE_ONSETS:
+        onsets_list = COMBINE_ONSETS(piece.get_onsets_seconds(), ONSET_DELTA)
+    # convert from second to sample
+    onsets_list = np.asarray(onsets_list) * sr
     # load from cache if available (check if feature type matches)
     if CACHED_PREPROCESSING and (odfs_cache.get(key) is not None) and (features_cache.get(key) == features):
         # retrieve from cached (already transposed and normalised)
@@ -97,7 +104,7 @@ def prepare_data(boeck_set, features, key):
     length = odfs.shape[0]
     target = onsets.onset_list_to_target(onsets_list, HOP_SIZE, length, ONSET_DELTA * sr / HOP_SIZE, key=key,
                                          mode=TARGET_MODE)
-    return length, odfs, target, onset_seconds, len(wave) / sr
+    return length, odfs, target, onsets_list, len(wave) / sr
 
 
 class BoeckDataLoader(object):
@@ -220,13 +227,13 @@ class ModelManager(object):
     def predict(self,
                 key=None,
                 wave=None,
-                hop_size=441,
-                n_fft=2048,
-                sr=441000,
+                hop_size=HOP_SIZE,
+                n_fft=N_FFT,
+                sr=SAMPLING_RATE,
                 verbose=False,
                 sigmoid=True):
         r"""
-        Specify either key or wave
+        either `key` or `wave` is needed
         if wave is specified, hop_size, n_fft, sr is used
 
         :return: raw network output if sigmoid=False
@@ -257,6 +264,40 @@ class ModelManager(object):
                 print(f"Audio {audio_len:.1f}sec, speed {audio_len / (t3 - t0):.1f}x")
         return out
 
+    def predict_onsets_offline(self, key=None, wave=None, height=0.5, **kwargs):
+        r"""
+        either `key` or `wave` is needed
+
+        :param height: minimum height of a peak
+        :return: Seconds of onsets, not combined
+        """
+        out = self.predict(key=key, wave=wave, **kwargs)
+        out = out.squeeze()
+        out = out.cpu()
+        if TARGET_MODE != 'precise':
+            peaks = scipy.signal.find_peaks(out, height=height)
+            frame_rate = SAMPLING_RATE / HOP_SIZE
+            onsets_sec = np.array(peaks[0]) / frame_rate
+            return onsets_sec
+        # TODO precise mode decoding
+        return None
+
+    def predict_onsets_online(self, key=None, wave=None, height=0.5, **kwargs):
+        r"""
+        either `key` or `wave` is needed
+
+        :param height: trigger value for rising edges
+        :return: Seconds of onsets, not combined
+        """
+        out = self.predict(key=key, wave=wave, **kwargs)
+        out = out.squeeze()
+        out = out.cpu()
+        rising_edges = np.flatnonzero(
+            ((out[:-1] <= height) & (out[1:] > height) | (out[:-1] < height) & (out[1:] >= height))) + 1
+        frame_rate = SAMPLING_RATE / HOP_SIZE
+        onsets_sec = rising_edges / frame_rate
+        return onsets_sec
+
     def generate_splits(self, test_split_index) -> tuple[list, list, list]:
         r"""
         :return: (training_set_keys, validation_set_keys, test_set_keys)
@@ -265,7 +306,7 @@ class ModelManager(object):
         # setup training set, validation set, test set
         test_set_keys = splits.pop(test_split_index)
         # set the first one as validation set
-        validation_set_keys = splits.pop(0)
+        validation_set_keys = splits.pop(test_split_index % len(splits))
         # flatten the training set
         training_set_keys = []
         for sublist in splits:
@@ -326,10 +367,44 @@ class ModelManager(object):
                 self.scheduler.step()
         return loss_record
 
-    def train_and_test(self, test_split_index, verbose=False, **kwargs):
+    def train_and_test(self, test_split_index, verbose=False, online=False, height=0.5, window=0.025, delay=0, **kwargs):
+        r"""
+
+        :param test_split_index: the split index of test set
+        :param online: bool
+        :param height: minimum height for an onset
+        :param window: evaluation window radius, in seconds
+        :param delay: time delay for detections, in seconds
+        :return: loss record, counter
+        """
         training_keys, validation_keys, test_keys = self.generate_splits(test_split_index)
-        return self.train_on_split(training_keys, validation_keys, verbose=verbose, **kwargs)
-        # TODO test (evaluation codes)
+        loss = self.train_on_split(training_keys, validation_keys, verbose=verbose, **kwargs)
+        count = self.test_on_keys(test_keys, online=online, height=height, window=window, delay=delay, **kwargs)
+        return loss, count
+
+    def test_on_keys(self, keys, online=False, height=0.5, window=0.025, delay=0, **kwargs):
+        r"""
+
+        :param keys: keys of the dataset to test
+        :param online: bool
+        :param height: minimum height for an onset
+        :param window: evaluation window radius, in seconds
+        :param delay: time delay for detections, in seconds
+        :return: counter
+        """
+        count = Counter()
+        for key in keys:
+            ground_truth = self.boeck_set.get_piece(key).get_onsets_seconds()
+            if online:
+                detections = self.predict_onsets_online(key=key, height=height, **kwargs)
+            else:
+                detections = self.predict_onsets_offline(key=key, height=height, **kwargs)
+            if COMBINE_ONSETS:
+                detections = COMBINE_ONSETS(detections, ONSET_DELTA)
+                ground_truth = COMBINE_ONSETS(ground_truth, ONSET_DELTA)
+            count1 = boeck.onset_evaluation.count_errors(detections, ground_truth, window, delay=delay)
+            count += count1
+        return count
 
 
 def test_network_training():
@@ -349,25 +424,11 @@ def test_network_training():
         milestones=[30, 230, 430], gamma=0.2)
 
     # training
-    loss = trainer.train_and_test(0, debug_max_epoch_count=700, verbose=True, batch_size=64)
+    loss = trainer.train_and_test(0, debug_max_epoch_count=1, verbose=True, batch_size=6)
     # loss = trainer.train_on_split(splits[1], [], debug_max_epoch_count=430, verbose=True, batch_size=64)
 
     # testing
-    test_key = splits[0][0]
-    piece = boeck_set.get_piece(test_key)
-    onset_seconds = boeck.onset_evaluation.combine_events(piece.get_onsets_seconds(), ONSET_DELTA)
-    onsets_list = np.asarray(onset_seconds) * 44100
-    onsets_list = onsets_list / HOP_SIZE
-
-    output = trainer.predict(key=test_key)
-    output = output.squeeze()
-    output = output.T
-    output = output.cpu()
-    utils.plot_odf(output, title="Network(Trained)", onsets=onsets_list)
-
-    length, odfs, target, onset_seconds, audio_len = prepare_data(boeck_set, trainer.features, test_key)
-    utils.plot_odf(odfs, title="SuperFlux")
-    utils.plot_odf(target, title="Target")
+    test_output(trainer, splits[0][0])
     utils.plot_loss(loss)
 
     trainer.save()
@@ -375,17 +436,33 @@ def test_network_training():
     # print(hidden)
 
 
-def test_output():
+def test_output(mgr, test_key):
     boeck_set = datasets.BockSet()
 
-    t0 = time.perf_counter()
-    mgr = ModelManager(boeck_set)
-    t1 = time.perf_counter()
-    print(f"Network initialized ({t1 - t0})")
-    prediction = mgr.predict(boeck_set.splits[0][0], verbose=True)
+    piece = boeck_set.get_piece(test_key)
+    onset_seconds = boeck.onset_evaluation.combine_events(piece.get_onsets_seconds(), ONSET_DELTA)
+    onsets_list = np.asarray(onset_seconds) * SAMPLING_RATE
+    onsets_list = np.floor_divide(onsets_list, HOP_SIZE)
 
-    print(prediction.shape)
-    print("CUDA ", prediction.is_cuda)
+    output = mgr.predict(key=test_key)
+    output = output.squeeze()
+    output = output.T
+    output = output.cpu()
+    utils.plot_odf(output, title="Network(Trained)", onsets=onsets_list)
+
+    length, odfs, target, onsets_samples, audio_len = prepare_data(boeck_set, mgr.features, test_key)
+    utils.plot_odf(odfs, title="SuperFlux")
+    utils.plot_odf(target, title="Target")
+
+
+def test_saved_model(filename, features=None):
+    boeck = datasets.BockSet()
+    model = torch.load(filename, map_location=networks.device)
+    mgr = ModelManager(boeck)
+    mgr.model = model
+    test_output(mgr, boeck.splits[0][0])
+    counter = mgr.test_on_keys(boeck.get_split(0))
+    print(f"Precision {counter.precision}, Recall {counter.recall}, F-score {counter.fmeasure}")
 
 
 def test_prepare_data():
@@ -393,7 +470,7 @@ def test_prepare_data():
     splits = boeck_set.splits
     for i in range(len(splits[0])):
         t0 = time.perf_counter()
-        length, odfs, target, onset_seconds, audio_len = prepare_data(boeck_set, None, splits[0][i])
+        length, odfs, target, onsets_samples, audio_len = prepare_data(boeck_set, None, splits[0][i])
         t1 = time.perf_counter()
         print(f"{audio_len:.2f}s, elapsed {t1 - t0:.2f}, {audio_len / (t1 - t0):.1f}x speed")
 
@@ -425,4 +502,4 @@ def test_data_loader():
 
 
 if __name__ == '__main__':
-    test_network_training()
+    test_saved_model('mdl_20211008 004755_tanh_2x4(bi)_rcd+spf.pt')
