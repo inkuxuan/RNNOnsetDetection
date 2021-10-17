@@ -231,7 +231,8 @@ class ModelManager(object):
                 n_fft=N_FFT,
                 sr=SAMPLING_RATE,
                 verbose=False,
-                sigmoid=True):
+                sigmoid=True,
+                **kwargs):
         r"""
         either `key` or `wave` is needed
         if wave is specified, hop_size, n_fft, sr is used
@@ -320,7 +321,8 @@ class ModelManager(object):
                        batch_size=CPU_CORES,
                        verbose=False,
                        debug_max_epoch_count=None,
-                       debug_min_loss=None):
+                       debug_min_loss=None,
+                       **kwargs):
         r"""
         Train the network on a specific training set and validation set
 
@@ -367,7 +369,13 @@ class ModelManager(object):
                 self.scheduler.step()
         return loss_record
 
-    def train_and_test(self, test_split_index, verbose=False, online=False, height=0.5, window=0.025, delay=0, **kwargs):
+    def train_only(self, test_split_index, verbose=False, **kwargs):
+        training_keys, validation_keys, test_keys = self.generate_splits(test_split_index)
+        loss = self.train_on_split(training_keys, validation_keys, verbose=verbose, **kwargs)
+        return loss
+
+    def train_and_test(self, test_split_index, verbose=False, online=False, height=0.5, window=0.025, delay=0,
+                       **kwargs):
         r"""
 
         :param test_split_index: the split index of test set
@@ -377,10 +385,21 @@ class ModelManager(object):
         :param delay: time delay for detections, in seconds
         :return: loss record, counter
         """
-        training_keys, validation_keys, test_keys = self.generate_splits(test_split_index)
-        loss = self.train_on_split(training_keys, validation_keys, verbose=verbose, **kwargs)
-        count = self.test_on_keys(test_keys, online=online, height=height, window=window, delay=delay, **kwargs)
+        loss = self.train_only(test_split_index, verbose=verbose, **kwargs)
+        count = self.test_only(test_split_index, online=online, height=height, window=window, delay=delay, **kwargs)
         return loss, count
+
+    def test_only(self, test_split_index, online=False, height=0.5, window=0.025, delay=0, **kwargs):
+        r"""
+
+        :param online: bool
+        :param height: minimum height for an onset
+        :param window: evaluation window radius, in seconds
+        :param delay: time delay for detections, in seconds
+        :return: counter
+        """
+        training_keys, validation_keys, test_keys = self.generate_splits(test_split_index)
+        return self.test_on_keys(test_keys, online=online, height=height, window=window, delay=delay, **kwargs)
 
     def test_on_keys(self, keys, online=False, height=0.5, window=0.025, delay=0, **kwargs):
         r"""
@@ -407,7 +426,19 @@ class ModelManager(object):
         return count
 
 
-def main(weight, init_lr, step_size, gamma, epoch, batch_size, features=FEATURES):
+def main(weight, init_lr, step_size, gamma, epoch, batch_size, heights, features=FEATURES):
+    r"""
+
+    :param weight:
+    :param init_lr:
+    :param step_size:
+    :param gamma:
+    :param epoch:
+    :param batch_size:
+    :param heights: list of heights to test
+    :param features:
+    :return:
+    """
     print(f"device: {networks.device}")
     print(f"cpu {CPU_CORES} cores")
 
@@ -423,9 +454,8 @@ def main(weight, init_lr, step_size, gamma, epoch, batch_size, features=FEATURES
                                                         step_size, gamma=gamma)
 
     # training
-    loss, count = trainer.train_and_test(0, debug_max_epoch_count=epoch, verbose=True, batch_size=batch_size)
-    print(f"Precision:{count.precision:.5f}, Recall:{count.recall:.5f}, F-score:{count.fmeasure:.5f}")
-    print(f"TP:{count.tp}, FP:{count.fp}, FN:{count.fn}")
+    # TODO multi threshold
+    loss = trainer.train_only(0, debug_max_epoch_count=epoch, verbose=True, batch_size=batch_size)
 
     # testing
     test_output(trainer, splits[0][0])
@@ -433,24 +463,30 @@ def main(weight, init_lr, step_size, gamma, epoch, batch_size, features=FEATURES
 
     trainer.save()
 
+    counts = {}
+    # test
+    for height in heights:
+        count = trainer.test_only(0, height=height)
+        counts[height] = count
+
     # report
     now = datetime.now()
     dstr = now.strftime("%Y%m%d %H%M%S")
-    with open("Report "+dstr+".txt", 'w') as file:
-        file.write("Training and Test Report\r\n")
-        file.write("[Parameters]\r\n")
-        file.write(f"weight for positive: {weight}\r\n")
-        file.write(f"initial learning rate: {init_lr}\r\n")
-        file.write(f"scheduler step size: {step_size}\r\n")
-        file.write(f"scheduler gamma: {gamma}\r\n")
-        file.write(f"no. of epochs: {epoch}\r\n")
-        file.write(f"batch size: {batch_size}\r\n")
-        file.write(f"Features: {features}\r\n")
-        file.writelines([
-            f"[Scores]",
-            f"Precision:{count.precision:.5f}, Recall:{count.recall:.5f}, F-score:{count.fmeasure:.5f}",
-            f"TP:{count.tp}, FP:{count.fp}, FN:{count.fn}"
-        ])
+    with open("Report " + dstr + ".txt", 'w') as file:
+        file.write("Training and Test Report\n")
+        file.write("[Parameters]\n")
+        file.write(f"weight for positive: {weight}\n")
+        file.write(f"initial learning rate: {init_lr}\n")
+        file.write(f"scheduler step size: {step_size}\n")
+        file.write(f"scheduler gamma: {gamma}\n")
+        file.write(f"no. of epochs: {epoch}\n")
+        file.write(f"batch size: {batch_size}\n")
+        file.write(f"Features: {features}\n")
+        file.write(f"\n[Scores] {features}\n")
+
+        file.writelines([f"Height={test[0]}\n"
+                         f"Precision:{test[1].precision:.5f} Recall:{test[1].recall:.5f} F-score:{test[1].fmeasure:.5f}\n"
+                         f"TP:{test[1].tp} FP:{test[1].fp} FN:{test[1].fn}\n\n" for test in counts.items()])
 
 
 def test_network_training():
@@ -548,9 +584,10 @@ def test_data_loader():
 
 
 if __name__ == '__main__':
-    main(3, 0.5, 50, 0.5, 1200, 64)
-    main(2, 0.5, 50, 0.5, 1200, 64)
-    main(1, 0.5, 50, 0.5, 1200, 64)
-    main(1, 0.5, 100, 0.5, 1200, 64)
-    main(3, 0.5, 50, 0.5, 1200, 64, features=['superflux'])
-    main(1, 0.5, 50, 0.5, 1200, 64, features=['superflux'])
+    heights = [0.2, 0.3, 0.4, 0.5]
+    main(3, 0.5, 50, 0.8, 1200, 64, heights)
+    main(2, 0.5, 50, 0.8, 1200, 64, heights)
+    main(1, 0.5, 50, 0.8, 1200, 64, heights)
+    main(1, 0.5, 100, 0.5, 1200, 64, heights)
+    main(3, 0.5, 50, 0.8, 1200, 64, heights, features=['superflux'])
+    main(1, 0.5, 50, 0.8, 1200, 64, heights, features=['superflux'])
