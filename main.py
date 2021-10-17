@@ -482,7 +482,7 @@ def main(weight, init_lr, step_size, gamma, epoch, batch_size, heights, features
         file.write(f"no. of epochs: {epoch}\n")
         file.write(f"batch size: {batch_size}\n")
         file.write(f"Features: {features}\n")
-        file.write(f"\n[Scores] {features}\n")
+        file.write(f"\n[Scores]\n")
 
         file.writelines([f"Height={test[0]}\n"
                          f"Precision:{test[1].precision:.5f} Recall:{test[1].recall:.5f} F-score:{test[1].fmeasure:.5f}\n"
