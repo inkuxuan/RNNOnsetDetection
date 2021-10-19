@@ -444,10 +444,9 @@ def main(weight, init_lr, step_size, gamma, epoch, batch_size, heights, features
 
     # configure
     boeck_set = datasets.BockSet()
-    trainer = ModelManager(boeck_set, bidirectional=True)
+    trainer = ModelManager(boeck_set, bidirectional=True, features=features)
     splits = trainer.boeck_set.splits
     # initialize
-    trainer.features = features
     trainer.loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(weight))
     trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=init_lr)
     trainer.scheduler = torch.optim.lr_scheduler.StepLR(trainer.optimizer,
@@ -585,9 +584,9 @@ def test_data_loader():
 
 if __name__ == '__main__':
     heights = [0.2, 0.3, 0.4, 0.5]
-    main(3, 0.5, 50, 0.8, 1200, 64, heights)
-    main(2, 0.5, 50, 0.8, 1200, 64, heights)
-    main(1, 0.5, 50, 0.8, 1200, 64, heights)
-    main(1, 0.5, 100, 0.5, 1200, 64, heights)
+    # main(3, 0.5, 50, 0.8, 1200, 64, heights)
+    # main(2, 0.5, 50, 0.8, 1200, 64, heights)
+    # main(1, 0.5, 50, 0.8, 1200, 64, heights)
+    # main(1, 0.5, 100, 0.5, 1200, 64, heights)
     main(3, 0.5, 50, 0.8, 1200, 64, heights, features=['superflux'])
     main(1, 0.5, 50, 0.8, 1200, 64, heights, features=['superflux'])
