@@ -426,19 +426,27 @@ class ModelManager(object):
         return count
 
 
-def main(weight, init_lr, step_size, gamma, epoch, batch_size, heights, features=FEATURES):
+def train_and_test_model(
+        test_set_index=0,
+        weight=1,
+        init_lr=0.5,
+        step_size=50,
+        gamma=0.8,
+        epoch=1200,
+        batch_size=64,
+        heights=None,
+        features=None,
+        write_report=True,
+        show_example_plot=True,
+        show_loss_plot=True,
+        save_model=True):
     r"""
 
-    :param weight:
-    :param init_lr:
-    :param step_size:
-    :param gamma:
-    :param epoch:
-    :param batch_size:
-    :param heights: list of heights to test
-    :param features:
-    :return:
+    :param heights: list of thresholds for evaluation
+    :return: a dict of (height, Count)
     """
+    if heights is None:
+        heights = [0.3]
     print(f"device: {networks.device}")
     print(f"cpu {CPU_CORES} cores")
 
@@ -454,38 +462,89 @@ def main(weight, init_lr, step_size, gamma, epoch, batch_size, heights, features
 
     # training
     # TODO multi threshold
-    loss = trainer.train_only(0, debug_max_epoch_count=epoch, verbose=True, batch_size=batch_size)
+    loss = trainer.train_only(test_set_index, debug_max_epoch_count=epoch, verbose=True, batch_size=batch_size)
 
     # testing
-    test_output(trainer, splits[0][0])
-    utils.plot_loss(loss)
-
-    trainer.save()
+    if show_example_plot:
+        test_output(trainer, splits[test_set_index][0])
+    if show_loss_plot:
+        utils.plot_loss(loss)
+    if save_model:
+        trainer.save()
 
     counts = {}
     # test
     for height in heights:
-        count = trainer.test_only(0, height=height)
+        count = trainer.test_only(test_set_index, height=height)
         counts[height] = count
 
     # report
-    now = datetime.now()
-    dstr = now.strftime("%Y%m%d %H%M%S")
-    with open("Report " + dstr + ".txt", 'w') as file:
-        file.write("Training and Test Report\n")
-        file.write("[Parameters]\n")
-        file.write(f"weight for positive: {weight}\n")
-        file.write(f"initial learning rate: {init_lr}\n")
-        file.write(f"scheduler step size: {step_size}\n")
-        file.write(f"scheduler gamma: {gamma}\n")
-        file.write(f"no. of epochs: {epoch}\n")
-        file.write(f"batch size: {batch_size}\n")
-        file.write(f"Features: {features}\n")
-        file.write(f"\n[Scores]\n")
+    if write_report:
+        now = datetime.now()
+        dstr = now.strftime("%Y%m%d %H%M%S")
+        with open("Report " + dstr + ".txt", 'w') as file:
+            file.write("Training and Test Report\n")
+            write_report_parameters(file, weight, init_lr, step_size, gamma, epoch, batch_size, features)
+            file.write(f"\n[Scores]\n")
 
-        file.writelines([f"Height={test[0]}\n"
-                         f"Precision:{test[1].precision:.5f} Recall:{test[1].recall:.5f} F-score:{test[1].fmeasure:.5f}\n"
-                         f"TP:{test[1].tp} FP:{test[1].fp} FN:{test[1].fn}\n\n" for test in counts.items()])
+            file.writelines([f"Height={test[0]}\n"
+                             f"Precision:{test[1].precision:.5f} Recall:{test[1].recall:.5f} F-score:{test[1].fmeasure:.5f}\n"
+                             f"TP:{test[1].tp} FP:{test[1].fp} FN:{test[1].fn}\n\n" for test in counts.items()])
+
+    return counts
+
+
+def train_and_test_8_fold(
+        weight=1,
+        init_lr=0.5,
+        step_size=50,
+        gamma=0.8,
+        epoch=1200,
+        batch_size=64,
+        height=0.3,
+        features=None,
+        write_report=False,
+        show_example_plot=False,
+        show_loss_plot=False,
+        save_model=False):
+    count = Counter()
+    for i in range(0, 8):
+        count += train_and_test_model(
+            test_set_index=i,
+            weight=weight,
+            init_lr=init_lr,
+            step_size=step_size,
+            gamma=gamma,
+            epoch=epoch,
+            batch_size=batch_size,
+            heights=[height],
+            features=features,
+            write_report=write_report,
+            show_example_plot=show_example_plot,
+            show_loss_plot=show_loss_plot,
+            save_model=save_model
+        )[height]
+    if write_report:
+        now = datetime.now()
+        dstr = now.strftime("%Y%m%d %H%M%S")
+        with open("Report " + dstr + "-8fold.txt", 'w') as file:
+            file.write("Training and 8-fold Test Report\n")
+            write_report_parameters(file, weight, init_lr, step_size, gamma, epoch, batch_size, features)
+            file.write(f"\n[Scores]\n")
+            file.writelines(f"Height={height}\n"
+                            f"Precision:{count.precision:.5f} Recall:{count.recall:.5f} F-score:{count.fmeasure:.5f}\n"
+                            f"TP:{count.tp} FP:{count.fp} FN:{count.fn}\n\n")
+
+
+def write_report_parameters(file, weight, init_lr, step_size, gamma, epoch, batch_size, features):
+    file.write("[Parameters]\n")
+    file.write(f"weight for positive: {weight}\n")
+    file.write(f"initial learning rate: {init_lr}\n")
+    file.write(f"scheduler step size: {step_size}\n")
+    file.write(f"scheduler gamma: {gamma}\n")
+    file.write(f"no. of epochs: {epoch}\n")
+    file.write(f"batch size: {batch_size}\n")
+    file.write(f"Features: {features}\n")
 
 
 def test_network_training():
@@ -583,10 +642,4 @@ def test_data_loader():
 
 
 if __name__ == '__main__':
-    heights = [0.2, 0.3, 0.4, 0.5]
-    # main(3, 0.5, 50, 0.8, 1200, 64, heights)
-    # main(2, 0.5, 50, 0.8, 1200, 64, heights)
-    # main(1, 0.5, 50, 0.8, 1200, 64, heights)
-    # main(1, 0.5, 100, 0.5, 1200, 64, heights)
-    main(3, 0.5, 50, 0.8, 1200, 64, heights, features=['superflux'])
-    main(1, 0.5, 50, 0.8, 1200, 64, heights, features=['superflux'])
+    train_and_test_8_fold()
