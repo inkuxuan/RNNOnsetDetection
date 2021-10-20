@@ -485,11 +485,7 @@ def train_and_test_model(
         with open("Report " + dstr + ".txt", 'w') as file:
             file.write("Training and Test Report\n")
             write_report_parameters(file, weight, init_lr, step_size, gamma, epoch, batch_size, features)
-            file.write(f"\n[Scores]\n")
-
-            file.writelines([f"Height={test[0]}\n"
-                             f"Precision:{test[1].precision:.5f} Recall:{test[1].recall:.5f} F-score:{test[1].fmeasure:.5f}\n"
-                             f"TP:{test[1].tp} FP:{test[1].fp} FN:{test[1].fn}\n\n" for test in counts.items()])
+            write_report_counts(file, counts)
 
     return counts
 
@@ -501,15 +497,17 @@ def train_and_test_8_fold(
         gamma=0.8,
         epoch=1200,
         batch_size=64,
-        height=0.3,
+        heights=None,
         features=None,
         write_report=False,
         show_example_plot=False,
         show_loss_plot=False,
         save_model=False):
-    count = Counter()
+    if heights is None:
+        heights = [0.3]
+    counts = {}
     for i in range(0, 8):
-        count += train_and_test_model(
+        results = train_and_test_model(
             test_set_index=i,
             weight=weight,
             init_lr=init_lr,
@@ -517,23 +515,30 @@ def train_and_test_8_fold(
             gamma=gamma,
             epoch=epoch,
             batch_size=batch_size,
-            heights=[height],
+            heights=heights,
             features=features,
             write_report=write_report,
             show_example_plot=show_example_plot,
             show_loss_plot=show_loss_plot,
             save_model=save_model
-        )[height]
-    if write_report:
-        now = datetime.now()
-        dstr = now.strftime("%Y%m%d %H%M%S")
-        with open("Report " + dstr + "-8fold.txt", 'w') as file:
-            file.write("Training and 8-fold Test Report\n")
-            write_report_parameters(file, weight, init_lr, step_size, gamma, epoch, batch_size, features)
-            file.write(f"\n[Scores]\n")
-            file.writelines(f"Height={height}\n"
-                            f"Precision:{count.precision:.5f} Recall:{count.recall:.5f} F-score:{count.fmeasure:.5f}\n"
-                            f"TP:{count.tp} FP:{count.fp} FN:{count.fn}\n\n")
+        )
+        for result in results.items():
+            if counts.get(result[0]) is None:
+                counts[result[0]] = Counter()
+            counts[result[0]] += result[1]
+    now = datetime.now()
+    dstr = now.strftime("%Y%m%d %H%M%S")
+    with open("Report " + dstr + "-8fold.txt", 'w') as file:
+        file.write("Training and 8-fold Test Report\n")
+        write_report_parameters(file, weight, init_lr, step_size, gamma, epoch, batch_size, features)
+        write_report_counts(file, counts)
+
+
+def write_report_counts(file, counts):
+    file.write(f"\n[Scores]\n")
+    file.writelines([f"Height={test[0]}\n"
+                     f"Precision:{test[1].precision:.5f} Recall:{test[1].recall:.5f} F-score:{test[1].fmeasure:.5f}\n"
+                     f"TP:{test[1].tp} FP:{test[1].fp} FN:{test[1].fn}\n\n" for test in counts.items()])
 
 
 def write_report_parameters(file, weight, init_lr, step_size, gamma, epoch, batch_size, features):
@@ -642,4 +647,4 @@ def test_data_loader():
 
 
 if __name__ == '__main__':
-    train_and_test_8_fold()
+    train_and_test_8_fold(heights=[0.20, 0.25, 0.30], epoch=1)
