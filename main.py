@@ -374,10 +374,13 @@ class ModelManager(object):
                         or (debug_max_epoch_count and epoch_now >= debug_max_epoch_count)):
                     continue_epoch = False
             # VALIDATION
+            print("Validating...")
+            v_start = time.perf_counter()
             counter = self.test_on_keys(validation_keys, height=self.VALIDATION_HEIGHT)
             f = counter.fmeasure
             f_score_record.append(f)
-            print(f"Validation F-measure: {f}")
+            v_end = time.perf_counter()
+            print(f"Validation F-measure: {f}, time elapsed: {v_end - v_start:.1f}s")
             # early stopping
             if f >= self.EARLY_STOP_F_THRESHOLD:
                 if f > last_f_score:
@@ -426,7 +429,7 @@ class ModelManager(object):
         test_keys = self.boeck_set.get_split(test_split_index)
         return self.test_on_keys(test_keys, online=online, height=height, window=window, delay=delay, **kwargs)
 
-    def test_on_keys(self, keys, online=False, height=0.5, window=0.025, delay=0, **kwargs):
+    def test_on_keys(self, keys, online=False, height=0.5, window=0.025, delay=0, concurrent=True, **kwargs):
         r"""
 
         :param keys: keys of the dataset to test
@@ -437,17 +440,30 @@ class ModelManager(object):
         :return: counter
         """
         count = Counter()
-        for key in keys:
-            ground_truth = self.boeck_set.get_piece(key).get_onsets_seconds()
-            if online:
-                detections = self.predict_onsets_online(key=key, height=height, **kwargs)
-            else:
-                detections = self.predict_onsets_offline(key=key, height=height, **kwargs)
-            if COMBINE_ONSETS:
-                detections = COMBINE_ONSETS(detections, ONSET_DELTA)
-                ground_truth = COMBINE_ONSETS(ground_truth, ONSET_DELTA)
-            count1 = boeck.onset_evaluation.count_errors(detections, ground_truth, window, delay=delay)
-            count += count1
+        if concurrent:
+            with ThreadPoolExecutor(max_workers=max([CPU_CORES, len(keys)])) as executor:
+                futures = []
+                for key in keys:
+                    future = executor.submit(self.test_on_key, key, online=online, height=height, window=window, delay=delay, **kwargs)
+                    futures.append(future)
+                for future in futures:
+                    count += future.result()
+        else:
+            for key in keys:
+                count1 = self.test_on_key(key, online=online, height=height, window=window, delay=delay, **kwargs)
+                count += count1
+        return count
+
+    def test_on_key(self, key, online=False, height=0.5, window=0.025, delay=0, **kwargs):
+        ground_truth = self.boeck_set.get_piece(key).get_onsets_seconds()
+        if online:
+            detections = self.predict_onsets_online(key=key, height=height, **kwargs)
+        else:
+            detections = self.predict_onsets_offline(key=key, height=height, **kwargs)
+        if COMBINE_ONSETS:
+            detections = COMBINE_ONSETS(detections, ONSET_DELTA)
+            ground_truth = COMBINE_ONSETS(ground_truth, ONSET_DELTA)
+        count = boeck.onset_evaluation.count_errors(detections, ground_truth, window, delay=delay)
         return count
 
 
@@ -487,6 +503,7 @@ class TrainingTask(object):
                              filename='Report.txt'):
         print(f"device: {networks.device}")
         print(f"cpu {CPU_CORES} cores")
+        print("Initializing Trainer and Model...")
         # configure
         trainer = ModelManager(self.boeck_set, bidirectional=True, features=self.features)
         splits = trainer.boeck_set.splits
@@ -496,10 +513,12 @@ class TrainingTask(object):
         trainer.scheduler = torch.optim.lr_scheduler.StepLR(trainer.optimizer,
                                                             self.step_size, gamma=self.gamma)
         # training
+        print("Training model...")
         loss, f_rec = trainer.train_only(test_set_index,
                                          debug_max_epoch_count=self.epoch,
                                          verbose=True, batch_size=self.batch_size)
         # testing
+        print("Saving and plotting...")
         if show_example_plot:
             test_output(trainer, splits[test_set_index][0])
         if show_plot:
@@ -507,13 +526,19 @@ class TrainingTask(object):
             utils.plot_loss(f_rec, title="F-measure")
         if save_model:
             trainer.save()
-        counts = {}
         # test
+        print(f"Evaluating model... ({len(self.heights)} tasks)")
+        t0 = time.perf_counter()
+        counts = {}
+        # concurrency is implemented by test tasks (trainer.test_on_key)
         for height in self.heights:
             count = trainer.test_only(test_set_index, height=height)
             counts[height] = count
+
+        t1 = time.perf_counter()
+        print(f"Evaluation done. Time elapsed {t1-t0:.2f}s")
         # report
-        with open(filename, 'w') as file:
+        with open(self.report_dir + filename, 'w') as file:
             file.write("Training and Test Report\n")
             self._write_report_parameters(file,
                                           self.weight, self.init_lr, self.step_size, self.gamma,
@@ -541,7 +566,7 @@ class TrainingTask(object):
                     counts[result[0]] = Counter()
                 counts[result[0]] += result[1]
                 counts_record.append(counts_record)
-        with open(filename, 'w') as file:
+        with open(self.report_dir + filename, 'w') as file:
             file.write("Training and 8-fold Test Report\n")
             self._write_report_parameters(file, self.weight, self.init_lr, self.step_size, self.gamma,
                                           self.epoch, self.batch_size, self.features)
@@ -554,9 +579,9 @@ class TrainingTask(object):
     @staticmethod
     def _write_report_counts(file, counts):
         file.write(f"\n[Scores]\n")
-        file.writelines([f"Height={test[0]}\n"
-                         f"Precision:{test[1].precision:.5f} Recall:{test[1].recall:.5f} F-score:{test[1].fmeasure:.5f}\n"
-                         f"TP:{test[1].tp} FP:{test[1].fp} FN:{test[1].fn}\n\n" for test in counts.items()])
+        file.writelines([f"Height={ct_tp[0]}\n"
+                         f"Precision:{ct_tp[1].precision:.5f} Recall:{ct_tp[1].recall:.5f} F-score:{ct_tp[1].fmeasure:.5f}\n"
+                         f"TP:{ct_tp[1].tp} FP:{ct_tp[1].fp} FN:{ct_tp[1].fn}\n\n" for ct_tp in sorted(counts.items())])
 
     @staticmethod
     def _write_report_parameters(file, weight, init_lr, step_size, gamma, epoch, batch_size, features):
@@ -666,6 +691,7 @@ def test_data_loader():
 
 if __name__ == '__main__':
     task = TrainingTask()
+    # task.train_and_test_model()
     task.train_and_test_8_fold(show_plot=True)
     task_sf = TrainingTask(features=['superflux'])
     task_sf.train_and_test_8_fold()
