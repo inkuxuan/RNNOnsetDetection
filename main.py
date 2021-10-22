@@ -665,5 +665,7 @@ def test_data_loader():
 
 
 if __name__ == '__main__':
-    task = TrainingTask(epoch=1)
-    task.train_and_test_model(show_example_plot=True, show_plot=True, save_model=False)
+    task = TrainingTask()
+    task.train_and_test_8_fold(show_plot=True)
+    task_sf = TrainingTask(features=['superflux'])
+    task_sf.train_and_test_8_fold()
