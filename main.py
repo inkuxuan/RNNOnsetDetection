@@ -4,7 +4,7 @@ import boeck.onset_program
 import datasets
 import networks
 import onsets
-import odf
+import onset_functions
 import utils
 
 from datetime import datetime
@@ -40,6 +40,13 @@ HOP_SIZE = 441
 ONSET_DELTA = 0.030
 TARGET_MODE = 'linear'
 DEFAULT_FEATURES = ['rcd', 'superflux']
+
+INITIAL_LR = 0.1
+MIN_LR = 0.00001
+GAMMA = 0.6
+SCHEDULER_PATIENCE = 5
+EARLY_STOP_PATIENCE = 20
+MAX_EPOCH = 3000
 # in [boeck.onset_evaluation.combine_events, onsets.merge_onsets, None]
 # stands for combining onsets by average, by the first onset, and no combination
 COMBINE_ONSETS = onsets.merge_onsets
@@ -47,6 +54,10 @@ COMBINE_ONSETS = onsets.merge_onsets
 
 def get_features(wave, features=None, n_fft=N_FFT, hop_size=HOP_SIZE, sr=SAMPLING_RATE, center=False) -> np.ndarray:
     r"""
+    :param center: Leave this to False, this will disable librosa's centering feature
+    :param sr: sampling rate
+    :param hop_size: FFT hop length
+    :param n_fft: FFT window size
     :param wave: audio wave
     :param features: list of features (str), in ['cd', 'rcd', 'superflux']
     :return: ndarray, axis 0 being feature type, axis 1 being the length of a sequence
@@ -57,13 +68,13 @@ def get_features(wave, features=None, n_fft=N_FFT, hop_size=HOP_SIZE, sr=SAMPLIN
     f = []
     for feature in features:
         if feature in ['complex_domain', 'cd']:
-            onset_strength = odf.complex_domain_odf(stft)
+            onset_strength = onset_functions.complex_domain_odf(stft)
             f.append(onset_strength)
         elif feature in ['rectified_complex_domain', 'rcd']:
-            onset_strength = odf.complex_domain_odf(stft, rectify=True)
+            onset_strength = onset_functions.complex_domain_odf(stft, rectify=True)
             f.append(onset_strength)
         elif feature in ['super_flux', 'superflux']:
-            onset_strength, _, _ = odf.super_flux_odf(stft, sr, n_fft, hop_size, center)
+            onset_strength, _, _ = onset_functions.super_flux_odf(stft, sr, n_fft, hop_size, center)
             f.append(onset_strength)
     return np.asarray(f)
 
@@ -171,13 +182,8 @@ class BoeckDataLoader(object):
             index = end_index
 
 
+# noinspection PyUnusedLocal
 class ModelManager(object):
-    # F-score below which early stopping is disabled
-    EARLY_STOP_F_THRESHOLD = 0.75
-    # Count after which training will be stopped if no improvements is observed
-    EARLY_STOP_COUNT = 20
-    # Height (threshold to perform onset detection) used in validation process
-    VALIDATION_HEIGHT = 0.5
 
     def __init__(self,
                  boeck_set: datasets.BockSet,
@@ -188,7 +194,12 @@ class ModelManager(object):
                  bidirectional=True,
                  loss_fn=None,
                  optimizer=None,
-                 scheduler=None):
+                 scheduler=None,
+                 init_lr=INITIAL_LR,
+                 scheduler_patience=SCHEDULER_PATIENCE,
+                 early_stop_patience=EARLY_STOP_PATIENCE,
+                 gamma=GAMMA,
+                 min_lr=MIN_LR):
         r"""
 
         :param features: list, element in ['rcd', 'cd', 'superflux']; default ['rcd', 'superflux']
@@ -198,6 +209,7 @@ class ModelManager(object):
         :param optimizer: default SGD
         :param scheduler: default milestone scheduler. Set to False to disable scheduler
         """
+        self.early_stop_patience = early_stop_patience
         self.boeck_set = boeck_set
         self.features = features
         if self.features is None:
@@ -215,10 +227,17 @@ class ModelManager(object):
             self.loss_fn = nn.BCEWithLogitsLoss()
         self.optimizer = optimizer
         if self.optimizer is None:
-            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.6)
+            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=init_lr)
         self.scheduler = scheduler
         if self.scheduler is None:
-            self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=[30, 40, 50], gamma=0.15)
+            self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',
+                patience=scheduler_patience,
+                factor=gamma,
+                min_lr=min_lr,
+                verbose=True
+            )
 
     def save(self, filename=None):
         if filename is None:
@@ -277,6 +296,8 @@ class ModelManager(object):
         r"""
         either `key` or `wave` is needed
 
+        :param wave: a wave audio in 1-d array
+        :param key: key of the track
         :param height: minimum height of a peak
         :return: Seconds of onsets, not combined
         """
@@ -295,6 +316,8 @@ class ModelManager(object):
         r"""
         either `key` or `wave` is needed
 
+        :param wave: a wave audio in 1-d array
+        :param key: key of the track
         :param height: trigger value for rising edges
         :return: Seconds of onsets, not combined
         """
@@ -329,75 +352,104 @@ class ModelManager(object):
                        batch_size=CPU_CORES,
                        verbose=False,
                        debug_max_epoch_count=None,
-                       debug_min_loss=None,
+                       early_stopping=True,
                        **kwargs):
         r"""
         Train the network on a specific training set and validation set
 
         -----
+        :param early_stopping: whether or not to perform early stopping according to patience set when initialized
+        :param debug_max_epoch_count: default None, if set to a int, end training in the specified epochs
+        :param validation_keys: list of keys in validation set
+        :param training_keys: list of keys in training set
         :param batch_size: How many pieces at a time to train the network.
         Training process uses concurrency for both pre-processing and training. This is default the cores count of CPU.
         :param verbose: bool, Print debug outputs
-        :return:
+        :return: dict containing {loss_record, valid_loss_record, epoch_now, lr}
         """
         loader = BoeckDataLoader(self.boeck_set, training_keys, batch_size, features=self.features)
+        valid_loader = BoeckDataLoader(self.boeck_set, validation_keys, len(validation_keys), features=self.features)
         continue_epoch = True
-        epochs_without_improvement = 0
-        last_f_score = 0.
         epoch_now = 0
         loss_record = []
-        f_score_record = []
+        valid_loss_record = []
+        if early_stopping:
+            early_stopping = utils.EarlyStopping(patience=EARLY_STOP_PATIENCE)
         while continue_epoch:
             epoch_now += 1
             print(f"===EPOCH {epoch_now}===")
+            print(f"lr={self.optimizer.param_groups[0]['lr']}")
+            avg_loss = self._fit(epoch_now, loader, verbose)
+            loss_record.append(avg_loss)
+            if debug_max_epoch_count and epoch_now >= debug_max_epoch_count:
+                continue_epoch = False
+            # VALIDATION
+            valid_loss = self._validate_loss(epoch_now, valid_loader)
+            valid_loss_record.append(valid_loss)
+            # LEARNING RATE UPDATE
             if self.scheduler:
-                print(f"lr={self.scheduler.get_lr()}")
+                self.scheduler.step(valid_loss)
+            # EARLY STOPPING
+            if early_stopping:
+                early_stopping(valid_loss)
+            if early_stopping.early_stop:
+                continue_epoch = False
+        return {'loss_record': loss_record,
+                'valid_loss_record': valid_loss_record,
+                'epoch_now': epoch_now,
+                'lr': self.optimizer.param_groups[0]['lr']}
+
+    # noinspection DuplicatedCode
+    def _fit(self, epoch_now, loader, verbose):
+        if verbose:
+            last_time = time.perf_counter()
+        track_count = 0
+        avg_loss = 0.
+        for v_in, target, total_len in loader.generate_data():
+            v_in = torch.from_numpy(v_in).to(device=networks.device).type(self.model.dtype)
+            target = torch.from_numpy(target).to(device=networks.device).type(self.model.dtype)
+            prediction, _ = self.model(v_in)
+            loss = self.loss_fn(prediction.squeeze(dim=2), target)
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            # loss calculation (weighted)
+            track_count += len(v_in)
+            avg_loss += loss.item() * len(v_in)
+
             if verbose:
-                last_time = time.perf_counter()
+                now = time.perf_counter()
+                # noinspection PyUnboundLocalVariable
+                print(f"{now - last_time:.1f}s {total_len / (now - last_time):.1f}x in epoch {epoch_now}")
+                print(f"loss: {loss.item():>7f}")
+                last_time = now
+        return avg_loss / track_count
+
+    # noinspection DuplicatedCode
+    def _validate_loss(self, epoch_now, loader):
+        with torch.no_grad():
+            t0 = time.perf_counter()
+            track_count = 0
+            avg_loss = 0.
             for v_in, target, total_len in loader.generate_data():
                 v_in = torch.from_numpy(v_in).to(device=networks.device).type(self.model.dtype)
                 target = torch.from_numpy(target).to(device=networks.device).type(self.model.dtype)
                 prediction, _ = self.model(v_in)
                 loss = self.loss_fn(prediction.squeeze(dim=2), target)
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
+                # loss calculation (weighted)
+                track_count += len(v_in)
+                avg_loss += loss.item() * len(v_in)
 
-                loss_record.append(loss.item())
-                if verbose:
-                    now = time.perf_counter()
-                    # noinspection PyUnboundLocalVariable
-                    print(f"{now - last_time:.1f}s {total_len / (now - last_time):.1f}x in epoch {epoch_now}")
-                    print(f"loss: {loss.item():>7f}")
-                    last_time = now
-                if ((debug_min_loss and loss.item() <= debug_min_loss)
-                        or (debug_max_epoch_count and epoch_now >= debug_max_epoch_count)):
-                    continue_epoch = False
-            # VALIDATION
-            print("Validating...")
-            v_start = time.perf_counter()
-            counter = self.test_on_keys(validation_keys, height=self.VALIDATION_HEIGHT)
-            f = counter.fmeasure
-            f_score_record.append(f)
-            v_end = time.perf_counter()
-            print(f"Validation F-measure: {f}, time elapsed: {v_end - v_start:.1f}s")
-            # early stopping
-            if f >= self.EARLY_STOP_F_THRESHOLD:
-                if f > last_f_score:
-                    epochs_without_improvement = 0
-                else:
-                    epochs_without_improvement += 1
-            print(f"{epochs_without_improvement} epochs without improvement")
-            if epochs_without_improvement >= self.EARLY_STOP_COUNT:
-                print(f"Early stopping training @ epoch {epoch_now}")
-                continue_epoch = False
-            last_f_score = f
-            # LEARNING RATE SCHEDULE
-            if self.scheduler:
-                self.scheduler.step()
-        return loss_record, f_score_record
+                t1 = time.perf_counter()
+                # noinspection PyUnboundLocalVariable
+                print(f"Validate: {t1 - t0:.1f}s {total_len / (t1 - t0):.1f}x in epoch {epoch_now}")
+                print(f"Valid_loss: {loss.item():>7f}")
+            return avg_loss / track_count
 
     def train_only(self, test_split_index, verbose=False, **kwargs):
+        r"""
+        :return: dict containing {loss_record, valid_loss_record, epoch_now, lr}
+        """
         training_keys, validation_keys, test_keys = self.generate_splits(test_split_index)
         info = self.train_on_split(training_keys, validation_keys, verbose=verbose, **kwargs)
         return info
@@ -406,16 +458,17 @@ class ModelManager(object):
                        **kwargs):
         r"""
 
+        :param verbose: whether to print a message every minibatch
         :param test_split_index: the split index of test set
         :param online: bool
         :param height: minimum height for an onset
         :param window: evaluation window radius, in seconds
         :param delay: time delay for detections, in seconds
-        :return: loss record, counter
+        :return: counter, training_info (dict)
         """
-        loss, f_rec = self.train_only(test_split_index, verbose=verbose, **kwargs)
-        count = self.test_only(test_split_index, online=online, height=height, window=window, delay=delay, **kwargs)
-        return loss, f_rec, count
+        info = self.train_only(test_split_index, verbose=verbose, **kwargs)
+        counter = self.test_only(test_split_index, online=online, height=height, window=window, delay=delay, **kwargs)
+        return counter, info
 
     def test_only(self, test_split_index, online=False, height=0.5, window=0.025, delay=0, **kwargs):
         r"""
@@ -444,7 +497,8 @@ class ModelManager(object):
             with ThreadPoolExecutor(max_workers=max([CPU_CORES, len(keys)])) as executor:
                 futures = []
                 for key in keys:
-                    future = executor.submit(self.test_on_key, key, online=online, height=height, window=window, delay=delay, **kwargs)
+                    future = executor.submit(self.test_on_key, key, online=online, height=height, window=window,
+                                             delay=delay, **kwargs)
                     futures.append(future)
                 for future in futures:
                     count += future.result()
@@ -470,23 +524,37 @@ class ModelManager(object):
 class TrainingTask(object):
     def __init__(self,
                  weight=1,
-                 init_lr=0.5,
-                 step_size=50,
-                 gamma=0.8,
-                 epoch=1200,
+                 init_lr=INITIAL_LR,
+                 gamma=GAMMA,
+                 epoch=MAX_EPOCH,
                  batch_size=64,
+                 nonlinearty='tanh',
                  heights=None,
-                 features=None):
+                 features=None,
+                 trainer=None,
+                 n_layers=2,
+                 n_units=4):
+        r"""
+        Specify a trainer if detailed settings are needed.
+        If a trainer is specified, the following parameters are ignored.
+        Otherwise a trainer will be instantiated using the following parameters:
+        weight, init_lr, step_size, gamma, epoch, batch_size, nonlinearty, features
+
+        -----
+        :parameter heights: list of thresholds for evaluation of onsets
+        """
         if heights is None:
             heights = [0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.7]
         if features is None:
             features = DEFAULT_FEATURES
+        self.n_units = n_units
+        self.n_layers = n_layers
         self.weight = weight
         self.init_lr = init_lr
-        self.step_size = step_size
         self.gamma = gamma
         self.epoch = epoch
         self.batch_size = batch_size
+        self.nonlinearty = nonlinearty
         self.heights = heights
         self.features = features
         now = datetime.now()
@@ -494,55 +562,64 @@ class TrainingTask(object):
         self.report_dir = f'report {dstr}/'
         os.makedirs(self.report_dir)
         self.boeck_set = datasets.BockSet()
+        self.trainer = trainer
 
     def train_and_test_model(self,
                              test_set_index=0,
                              show_example_plot=True,
                              show_plot=True,
                              save_model=True,
-                             filename='Report.txt'):
+                             filename='Report.txt',
+                             **kwargs):
+        r"""
+        :return: a dict, item defined as (height, Counter)
+        """
         print(f"device: {networks.device}")
         print(f"cpu {CPU_CORES} cores")
         print("Initializing Trainer and Model...")
         # configure
-        trainer = ModelManager(self.boeck_set, bidirectional=True, features=self.features)
-        splits = trainer.boeck_set.splits
-        # initialize
-        trainer.loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(self.weight))
-        trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=self.init_lr)
-        trainer.scheduler = torch.optim.lr_scheduler.StepLR(trainer.optimizer,
-                                                            self.step_size, gamma=self.gamma)
+        if not self.trainer:
+            self.trainer = ModelManager(self.boeck_set, bidirectional=True,
+                                        features=self.features, nonlinearity=self.nonlinearty,
+                                        init_lr=self.init_lr, gamma=self.gamma,
+                                        num_layers=self.n_layers, num_layer_unit=self.n_units)
+            # initialize
+            self.trainer.loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(self.weight))
+        splits = self.trainer.boeck_set.splits
         # training
         print("Training model...")
-        loss, f_rec = trainer.train_only(test_set_index,
-                                         debug_max_epoch_count=self.epoch,
-                                         verbose=True, batch_size=self.batch_size)
+        train_info = self.trainer.train_only(test_set_index,
+                                             debug_max_epoch_count=self.epoch,
+                                             verbose=True, batch_size=self.batch_size,
+                                             **kwargs)
         # testing
         print("Saving and plotting...")
         if show_example_plot:
-            test_output(trainer, splits[test_set_index][0])
+            test_output(self.trainer, splits[test_set_index][0])
         if show_plot:
-            utils.plot_loss(loss)
-            utils.plot_loss(f_rec, title="F-measure")
+            utils.plot_loss(train_info['loss_record'])
+            utils.plot_loss(train_info['valid_loss_record'], title="Validation Loss")
         if save_model:
-            trainer.save()
+            self.trainer.save()
         # test
         print(f"Evaluating model... ({len(self.heights)} tasks)")
         t0 = time.perf_counter()
         counts = {}
         # concurrency is implemented by test tasks (trainer.test_on_key)
         for height in self.heights:
-            count = trainer.test_only(test_set_index, height=height)
+            count = self.trainer.test_only(test_set_index, height=height)
             counts[height] = count
 
         t1 = time.perf_counter()
-        print(f"Evaluation done. Time elapsed {t1-t0:.2f}s")
+        print(f"Evaluation done. Time elapsed {t1 - t0:.2f}s")
         # report
         with open(self.report_dir + filename, 'w') as file:
             file.write("Training and Test Report\n")
-            self._write_report_parameters(file,
-                                          self.weight, self.init_lr, self.step_size, self.gamma,
-                                          self.epoch, self.batch_size, self.features)
+            self._write_report_parameters(file, self.n_layers, self.n_units,
+                                          self.weight, self.init_lr, self.gamma,
+                                          self.epoch, self.batch_size, self.features,
+                                          epoch_now=train_info['epoch_now'], lr_now=train_info['lr'],
+                                          valid_loss=train_info['valid_loss_record'])
             self._write_report_counts(file, counts)
         return counts
 
@@ -550,49 +627,59 @@ class TrainingTask(object):
                               show_example_plot=False,
                               show_plot=False,
                               save_model=False,
-                              filename='Report-Summary.txt'):
+                              filename='Report-Summary.txt',
+                              **kwargs):
+        # dict of (height, Counter)
         counts = {}
         counts_record = []
+        print("[8-fold cross validation]")
         for i in range(0, len(self.boeck_set.splits)):
+            print(f'[Fold] {i}')
             results = self.train_and_test_model(
                 test_set_index=i,
                 show_example_plot=show_example_plot,
                 show_plot=show_plot,
                 save_model=save_model,
-                filename=f'Report-fold{i}.txt'
+                filename=f'Report-fold{i}.txt',
+                **kwargs
             )
+            counts_record.append(results)
             for result in results.items():
                 if counts.get(result[0]) is None:
                     counts[result[0]] = Counter()
                 counts[result[0]] += result[1]
-                counts_record.append(counts_record)
         with open(self.report_dir + filename, 'w') as file:
             file.write("Training and 8-fold Test Report\n")
-            self._write_report_parameters(file, self.weight, self.init_lr, self.step_size, self.gamma,
+            self._write_report_parameters(file, self.n_layers, self.n_units,
+                                          self.weight, self.init_lr, self.gamma,
                                           self.epoch, self.batch_size, self.features)
+            file.write("\n**Summary**\n\n")
+            self._write_report_counts(file, counts)
             file.write("\n**Reports for Each Fold**\n\n")
             for counts_each in counts_record:
                 self._write_report_counts(file, counts_each)
-            file.write("\n**Summary**\n\n")
-            self._write_report_counts(file, counts)
 
     @staticmethod
     def _write_report_counts(file, counts):
         file.write(f"\n[Scores]\n")
         file.writelines([f"Height={ct_tp[0]}\n"
-                         f"Precision:{ct_tp[1].precision:.5f} Recall:{ct_tp[1].recall:.5f} F-score:{ct_tp[1].fmeasure:.5f}\n"
+                         f"Precision:{ct_tp[1].precision:.5f} Recall:{ct_tp[1].recall:.5f} "
+                         f"F-score:{ct_tp[1].fmeasure:.5f}\n"
                          f"TP:{ct_tp[1].tp} FP:{ct_tp[1].fp} FN:{ct_tp[1].fn}\n\n" for ct_tp in sorted(counts.items())])
 
     @staticmethod
-    def _write_report_parameters(file, weight, init_lr, step_size, gamma, epoch, batch_size, features):
+    def _write_report_parameters(file, layer, unit, weight, init_lr, gamma, epoch, batch_size, features,
+                                 epoch_now=0, lr_now=0., valid_loss=None):
         file.write("[Parameters]\n")
+        file.write(f"structure: {unit} units x {layer} layers\n")
         file.write(f"weight for positive: {weight}\n")
-        file.write(f"initial learning rate: {init_lr}\n")
-        file.write(f"scheduler step size: {step_size}\n")
+        file.write(f"learning rate: {lr_now}/{init_lr}\n")
         file.write(f"scheduler gamma: {gamma}\n")
-        file.write(f"no. of epochs: {epoch}\n")
+        file.write(f"no. of epochs: {epoch_now}/{epoch}\n")
         file.write(f"batch size: {batch_size}\n")
         file.write(f"Features: {features}\n")
+        if valid_loss:
+            file.write(f"Loss(valid): {valid_loss}\n")
 
 
 def test_network_training():
@@ -612,12 +699,11 @@ def test_network_training():
         milestones=[30, 230, 430], gamma=0.2)
 
     # training
-    loss, f, count = trainer.train_and_test(0, debug_max_epoch_count=1, verbose=True, batch_size=6)
-    # loss = trainer.train_on_split(splits[1], [], debug_max_epoch_count=430, verbose=True, batch_size=64)
+    count, info = trainer.train_and_test(0, debug_max_epoch_count=1, verbose=True, batch_size=6)
 
     # testing
     test_output(trainer, splits[0][0])
-    utils.plot_loss(loss)
+    utils.plot_loss(info['valid_loss_record'])
 
     trainer.save()
 
@@ -644,12 +730,12 @@ def test_output(mgr, test_key):
 
 
 def test_saved_model(filename, features=None):
-    boeck = datasets.BockSet()
+    boeck_set = datasets.BockSet()
     model = torch.load(filename, map_location=networks.device)
-    mgr = ModelManager(boeck)
+    mgr = ModelManager(boeck_set, features=features)
     mgr.model = model
-    test_output(mgr, boeck.splits[0][0])
-    counter = mgr.test_on_keys(boeck.get_split(0))
+    test_output(mgr, boeck_set.splits[0][0])
+    counter = mgr.test_on_keys(boeck_set.get_split(0))
     print(f"Precision {counter.precision}, Recall {counter.recall}, F-score {counter.fmeasure}")
 
 
@@ -665,10 +751,10 @@ def test_prepare_data():
 
 def test_data_loader():
     batch_size = 8
-    boeck = datasets.BockSet()
-    mgr = ModelManager(boeck)
+    boeck_set = datasets.BockSet()
+    mgr = ModelManager(boeck_set)
     training_set, _, _ = mgr.generate_splits(2)
-    loader = BoeckDataLoader(boeck, training_set, batch_size)
+    loader = BoeckDataLoader(boeck_set, training_set, batch_size)
     t0 = time.perf_counter()
     audio_length = 0
     v_in = None
@@ -690,8 +776,12 @@ def test_data_loader():
 
 
 if __name__ == '__main__':
-    task = TrainingTask()
-    # task.train_and_test_model()
-    task.train_and_test_8_fold(show_plot=True)
+    print("Task 1: RCD+SuperFlux")
+    task_sf = TrainingTask(features=['rcd', 'superflux'])
+    task_sf.train_and_test_8_fold()
+    print("Task 2: SuperFlux (baseline)")
     task_sf = TrainingTask(features=['superflux'])
+    task_sf.train_and_test_8_fold()
+    print("Task 3: RCD+SuperFlux (8x2)")
+    task_sf = TrainingTask(features=['rcd', 'superflux'], n_layers=2, n_units=8)
     task_sf.train_and_test_8_fold()

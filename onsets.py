@@ -78,7 +78,7 @@ def test():
     onsets = [0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12]
     m = merge_onsets(onsets, 2)
     print(m)
-    merge_onsets(onsets, 2, in_place=True)
+    onsets = merge_onsets(onsets, 2)
     print(onsets)
 
 

@@ -36,6 +36,7 @@ def complex_domain_odf(stft, aggregate=np.mean, rectify=True):
     return aggregate(np.abs(cd_result), axis=0)
 
 
+# noinspection DuplicatedCode
 def _tone_frequencies(band_per_octave, f_min=27.5, f_max=17000, initial_freq=440):
     r"""
     Used to generate a frequency array include frequencies for each tone evenly placed in octaves.
@@ -151,7 +152,7 @@ def tonal_spectrogram(stft, filter_bank=None, power_spectrum=False):
     if power_spectrum:
         spectrogram = spectrogram ** 2
     if filter_bank is not None:
-        n_frame = stft.shape[1]
+        # n_frame = stft.shape[1]
         spectrogram = np.dot(filter_bank, spectrogram)
     if power_spectrum:
         spectrogram = librosa.core.power_to_db(spectrogram)
@@ -217,7 +218,7 @@ def super_flux_odf(
     # apply the maximum filter,
     # if center=True, it will pad the onset envelope
     # by ``n_fft // (2 * hop_size)`` frames
-    # to compensate the sftf and hop-size effect
+    # to compensate the sftf and hop-size effect (here default is set to False)
     onset_strength = librosa.onset.onset_strength(
         sr=sr, S=spectrogram, lag=lag, max_size=max_size, center=center,
         n_fft=n_fft, hop_length=hop_size)
@@ -226,8 +227,9 @@ def super_flux_odf(
 
 def mel_filter_onset_strength(stft, sr, n_fft, hop_size):
     r"""
-    This is equivalent to calling librosa.onset.onset_strength(), but can make use of the stft
+    This is equivalent to calling librosa.onset.onset_strength(), but can make use of the stft frames
 
+    :param hop_size: stft hop length
     :param stft: stft frames
     :param sr: sample rate of audio
     :param n_fft: fft window size
@@ -308,6 +310,7 @@ def test_cd():
     onset_frames = librosa.samples_to_frames(onsets, 441, n_fft=2048)
     utils.plot_odf(cd[200:400], title="CD")
     utils.plot_odf(rcd[200:400], title="RCD")
+
 
 if __name__ == '__main__':
     test_cd()

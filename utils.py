@@ -67,5 +67,28 @@ def test_with_key(key, start, stop):
     plot_music_net_roll(piece.get_raw_labels(), sr, start=start, end=stop)
 
 
+class EarlyStopping(object):
+    def __init__(self, patience=20, min_improvement=0.):
+        self.min_improvement = min_improvement
+        self.patience = patience
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+
+    def __call__(self, loss):
+        if self.best_loss is None:
+            self.best_loss = loss
+        elif self.best_loss - loss > self.min_improvement:
+            # improvement made
+            self.best_loss = loss
+            self.counter = 0
+        elif self.best_loss - loss <= self.min_improvement:
+            self.counter += 1
+            print(f"[Early Stop] {self.counter} / {self.patience}")
+            if self.counter >= self.patience:
+                print("[!]Early Stopping!")
+                self.early_stop = True
+
+
 if __name__ == '__main__':
     test_with_key('2297', 15, 30)
