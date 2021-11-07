@@ -41,15 +41,15 @@ ONSET_DELTA = 0.030
 TARGET_MODE = 'linear'
 DEFAULT_FEATURES = ['rcd', 'superflux']
 
-INITIAL_LR = 0.1
-MIN_LR = 0.00001
-GAMMA = 0.6
+INITIAL_LR = 0.125
+MIN_LR = 0.001
+GAMMA = 0.8
 SCHEDULER_PATIENCE = 5
 EARLY_STOP_PATIENCE = 20
 MAX_EPOCH = 3000
 # in [boeck.onset_evaluation.combine_events, onsets.merge_onsets, None]
 # stands for combining onsets by average, by the first onset, and no combination
-COMBINE_ONSETS = onsets.merge_onsets
+COMBINE_ONSETS = boeck.onset_evaluation.combine_events
 
 
 def get_features(wave, features=None, n_fft=N_FFT, hop_size=HOP_SIZE, sr=SAMPLING_RATE, center=False) -> np.ndarray:
@@ -238,6 +238,9 @@ class ModelManager(object):
                 min_lr=min_lr,
                 verbose=True
             )
+
+    def initialize_model(self):
+        self.model.init_normal()
 
     def save(self, filename=None):
         if filename is None:
@@ -583,11 +586,12 @@ class TrainingTask(object):
                                         features=self.features, nonlinearity=self.nonlinearty,
                                         init_lr=self.init_lr, gamma=self.gamma,
                                         num_layers=self.n_layers, num_layer_unit=self.n_units)
-            # initialize
             self.trainer.loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(self.weight))
+        # initialize
         splits = self.trainer.boeck_set.splits
         # training
         print("Training model...")
+        self.trainer.initialize_model()
         train_info = self.trainer.train_only(test_set_index,
                                              debug_max_epoch_count=self.epoch,
                                              verbose=True, batch_size=self.batch_size,
@@ -626,7 +630,7 @@ class TrainingTask(object):
     def train_and_test_8_fold(self,
                               show_example_plot=False,
                               show_plot=False,
-                              save_model=False,
+                              save_model=True,
                               filename='Report-Summary.txt',
                               **kwargs):
         # dict of (height, Counter)
@@ -778,10 +782,10 @@ def test_data_loader():
 if __name__ == '__main__':
     print("Task 1: RCD+SuperFlux")
     task_sf = TrainingTask(features=['rcd', 'superflux'])
-    task_sf.train_and_test_8_fold()
+    task_sf.train_and_test_8_fold(save_model=True)
     print("Task 2: SuperFlux (baseline)")
     task_sf = TrainingTask(features=['superflux'])
-    task_sf.train_and_test_8_fold()
+    task_sf.train_and_test_8_fold(save_model=True)
     print("Task 3: RCD+SuperFlux (8x2)")
     task_sf = TrainingTask(features=['rcd', 'superflux'], n_layers=2, n_units=8)
-    task_sf.train_and_test_8_fold()
+    task_sf.train_and_test_8_fold(save_model=True)

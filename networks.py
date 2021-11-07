@@ -63,3 +63,15 @@ class SingleOutRNN(nn.Module):
         if self.sigmoid:
             output = torch.sigmoid(output)
         return output, hidden_next
+
+    def init_normal(self):
+        for name, param in self.recurrent.named_parameters():
+            if name.startswith("weight"):
+                nn.init.normal_(param, std=0.1)
+            else:
+                param.data.fill_(0)
+        for name, param in self.final.named_parameters():
+            if name.startswith("weight"):
+                nn.init.normal_(param, std=0.1)
+            else:
+                param.data.fill_(0)
