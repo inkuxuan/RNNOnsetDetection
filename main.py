@@ -93,7 +93,7 @@ def prepare_data(boeck_set, features, key):
     piece = boeck_set.get_piece(key)
     wave, onsets_list, sr = piece.get_data()
     if COMBINE_ONSETS:
-        onsets_list = COMBINE_ONSETS(piece.get_onsets_seconds(), ONSET_DELTA, key=key)
+        onsets_list = COMBINE_ONSETS(piece.get_onsets_seconds(), ONSET_DELTA)
     # convert from second to sample
     onsets_list = np.asarray(onsets_list) * sr
     # load from cache if available (check if feature type matches)
@@ -519,8 +519,8 @@ class ModelManager(object):
         else:
             detections = self.predict_onsets_offline(key=key, height=height, **kwargs)
         if COMBINE_ONSETS:
-            detections = COMBINE_ONSETS(detections, ONSET_DELTA, key=key)
-            ground_truth = COMBINE_ONSETS(ground_truth, ONSET_DELTA, key=key)
+            detections = COMBINE_ONSETS(detections, ONSET_DELTA)
+            ground_truth = COMBINE_ONSETS(ground_truth, ONSET_DELTA)
         count = boeck.onset_evaluation.count_errors(detections, ground_truth, window, delay=delay)
         return count
 

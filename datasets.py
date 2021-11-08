@@ -125,7 +125,7 @@ class BockSet(object):
         self.keys = []
         for filename in os.listdir(BockSet.AUDIO_PATH):
             if filename.endswith(".flac"):
-                self.keys.append(os.path.split(filename)[0])
+                self.keys.append(os.path.splitext(filename)[0])
         # all 8 splits as a list
         self.splits = []
         for filename in os.listdir(BockSet.SPLITS_PATH):
@@ -247,6 +247,15 @@ def test_BockSet():
     print(piece.get_sr())
     print(type(piece.get_onsets()))
     print(piece.get_onsets())
+    keys = bock.get_all_keys()
+    for key in keys:
+        try:
+            onsets = bock.get_piece(key).get_onsets_seconds()
+            if len(onsets) == 0:
+                print(f"Onset length = 0 for {key}")
+        except FileNotFoundError:
+            pass
+
 
 
 if __name__ == '__main__':

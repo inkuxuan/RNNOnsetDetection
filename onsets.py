@@ -14,7 +14,8 @@ def combine_onsets(onsets, time_interval, key=None):
     :return: list of merged onsets
     """
     if len(onsets) < 1:
-        print(f"[WARNING] Empty onset list! key={key}")
+        if key:
+            print(f"[WARNING] Empty onset list! key={key}")
         return []
     onsets_original = onsets.copy()
     onsets_original.sort()
@@ -38,7 +39,8 @@ def combine_onsets_avg(onsets, time_interval, key=None):
     :return: list of merged onsets
     """
     if len(onsets) < 1:
-        print(f"[WARNING] Empty onset list! key={key}")
+        if key:
+            print(f"[WARNING] Empty onset list! key={key}")
         return []
     onsets_original = onsets.copy()
     onsets_original.sort()
