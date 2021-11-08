@@ -42,14 +42,15 @@ TARGET_MODE = 'linear'
 DEFAULT_FEATURES = ['rcd', 'superflux']
 
 INITIAL_LR = 0.125
-MIN_LR = 0.001
+MIN_LR = 0.01
 GAMMA = 0.8
-SCHEDULER_PATIENCE = 5
-EARLY_STOP_PATIENCE = 20
-MAX_EPOCH = 3000
-# in [boeck.onset_evaluation.combine_events, onsets.merge_onsets, None]
+SCHEDULER_PATIENCE = 10
+EARLY_STOP_PATIENCE = 50
+MAX_EPOCH = 5000
+# function reference for onset combiner
+# in [onsets.combine_onsets_avg, onsets.merge_onsets, None]
 # stands for combining onsets by average, by the first onset, and no combination
-COMBINE_ONSETS = boeck.onset_evaluation.combine_events
+COMBINE_ONSETS = onsets.combine_onsets_avg
 
 
 def get_features(wave, features=None, n_fft=N_FFT, hop_size=HOP_SIZE, sr=SAMPLING_RATE, center=False) -> np.ndarray:
@@ -92,7 +93,7 @@ def prepare_data(boeck_set, features, key):
     piece = boeck_set.get_piece(key)
     wave, onsets_list, sr = piece.get_data()
     if COMBINE_ONSETS:
-        onsets_list = COMBINE_ONSETS(piece.get_onsets_seconds(), ONSET_DELTA)
+        onsets_list = COMBINE_ONSETS(piece.get_onsets_seconds(), ONSET_DELTA, key=key)
     # convert from second to sample
     onsets_list = np.asarray(onsets_list) * sr
     # load from cache if available (check if feature type matches)
@@ -518,8 +519,8 @@ class ModelManager(object):
         else:
             detections = self.predict_onsets_offline(key=key, height=height, **kwargs)
         if COMBINE_ONSETS:
-            detections = COMBINE_ONSETS(detections, ONSET_DELTA)
-            ground_truth = COMBINE_ONSETS(ground_truth, ONSET_DELTA)
+            detections = COMBINE_ONSETS(detections, ONSET_DELTA, key=key)
+            ground_truth = COMBINE_ONSETS(ground_truth, ONSET_DELTA, key=key)
         count = boeck.onset_evaluation.count_errors(detections, ground_truth, window, delay=delay)
         return count
 

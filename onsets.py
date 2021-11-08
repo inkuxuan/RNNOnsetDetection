@@ -3,17 +3,18 @@ import sys
 import math
 
 
-def merge_onsets(onsets, time_interval):
+def combine_onsets(onsets, time_interval, key=None):
     r"""
     Merge onsets that are close to each other. This only preserve the first onset.
-    For merging using arithmetic mean, refer to boeck's code
 
     -----
+    :param key: for information when printing warning
     :param onsets: list of onsets
     :param time_interval: threshold (inclusive) within which onsets are merged (only the first one is remained)
     :return: list of merged onsets
     """
     if len(onsets) < 1:
+        print(f"[WARNING] Empty onset list! key={key}")
         return []
     onsets_original = onsets.copy()
     onsets_original.sort()
@@ -23,6 +24,33 @@ def merge_onsets(onsets, time_interval):
         # insert one onset that is at least time_interval away from the last one
         if onsets_original[i] - onsets[len(onsets) - 1] > time_interval:
             onsets.append(onsets_original[i])
+    return onsets
+
+
+def combine_onsets_avg(onsets, time_interval, key=None):
+    r"""
+    Merge onsets that are close to each other replacing with arithmetic mean.
+
+    -----
+    :param key: for information when printing warning
+    :param onsets: list of onsets
+    :param time_interval: threshold (inclusive) within which onsets are merged
+    :return: list of merged onsets
+    """
+    if len(onsets) < 1:
+        print(f"[WARNING] Empty onset list! key={key}")
+        return []
+    onsets_original = onsets.copy()
+    onsets_original.sort()
+    # the final output(combined), initialize with the first onset
+    onsets = []
+    index = 0
+    while index < len(onsets_original):
+        first_index = index
+        first = onsets_original[first_index]
+        while index < len(onsets_original) and (onsets_original[index] - first <= time_interval):
+            index += 1
+        onsets.append(np.mean(onsets_original[first_index:index]))
     return onsets
 
 
@@ -76,9 +104,9 @@ def onset_list_to_target(onsets, sample_per_frame, length, delta, mode='linear',
 
 def test():
     onsets = [0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12]
-    m = merge_onsets(onsets, 2)
+    m = combine_onsets(onsets, 2)
     print(m)
-    onsets = merge_onsets(onsets, 2)
+    onsets = combine_onsets(onsets, 2)
     print(onsets)
 
 
