@@ -519,7 +519,7 @@ class ModelManager(object):
         else:
             detections = self.predict_onsets_offline(key=key, height=height, **kwargs)
         if COMBINE_ONSETS:
-            detections = COMBINE_ONSETS(detections, ONSET_DELTA)
+            detections = COMBINE_ONSETS(detections, ONSET_DELTA, key=f"detection:{key}, height={height}")
             ground_truth = COMBINE_ONSETS(ground_truth, ONSET_DELTA)
         count = boeck.onset_evaluation.count_errors(detections, ground_truth, window, delay=delay)
         return count
