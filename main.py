@@ -474,7 +474,8 @@ class ModelManager(object):
         counter = self.test_only(test_split_index, online=online, height=height, window=window, delay=delay, **kwargs)
         return counter, info
 
-    def test_only(self, test_split_index, online=False, height=0.5, window=0.025, delay=0, **kwargs):
+    def test_only(self, test_split_index, online=False,
+                  combine_output_onsets=True, height=0.5, window=0.025, delay=0, **kwargs):
         r"""
 
         :param online: bool
@@ -484,9 +485,11 @@ class ModelManager(object):
         :return: counter
         """
         test_keys = self.boeck_set.get_split(test_split_index)
-        return self.test_on_keys(test_keys, online=online, height=height, window=window, delay=delay, **kwargs)
+        return self.test_on_keys(test_keys, online=online, combine_output_onsets=combine_output_onsets,
+                                 height=height, window=window, delay=delay, **kwargs)
 
-    def test_on_keys(self, keys, online=False, height=0.5, window=0.025, delay=0, concurrent=True, **kwargs):
+    def test_on_keys(self, keys, online=False, combine_output_onsets=True, height=0.5, window=0.025, delay=0,
+                     concurrent=True, **kwargs):
         r"""
 
         :param keys: keys of the dataset to test
@@ -502,24 +505,28 @@ class ModelManager(object):
                 futures = []
                 for key in keys:
                     future = executor.submit(self.test_on_key, key, online=online, height=height, window=window,
+                                             combine_output_onsets=combine_output_onsets,
                                              delay=delay, **kwargs)
                     futures.append(future)
                 for future in futures:
                     count += future.result()
         else:
             for key in keys:
-                count1 = self.test_on_key(key, online=online, height=height, window=window, delay=delay, **kwargs)
+                count1 = self.test_on_key(key, online=online,
+                                          combine_output_onsets=combine_output_onsets, height=height, window=window,
+                                          delay=delay, **kwargs)
                 count += count1
         return count
 
-    def test_on_key(self, key, online=False, height=0.5, window=0.025, delay=0, **kwargs):
+    def test_on_key(self, key, online=False, combine_output_onsets=True, height=0.5, window=0.025, delay=0, **kwargs):
         ground_truth = self.boeck_set.get_piece(key).get_onsets_seconds()
         if online:
             detections = self.predict_onsets_online(key=key, height=height, **kwargs)
         else:
             detections = self.predict_onsets_offline(key=key, height=height, **kwargs)
         if COMBINE_ONSETS:
-            detections = COMBINE_ONSETS(detections, ONSET_DELTA, key=f"detection:{key}, height={height}")
+            if combine_output_onsets and not online:
+                detections = COMBINE_ONSETS(detections, ONSET_DELTA, key=f"detection:{key}, height={height}")
             ground_truth = COMBINE_ONSETS(ground_truth, ONSET_DELTA)
         count = boeck.onset_evaluation.count_errors(detections, ground_truth, window, delay=delay)
         return count
@@ -612,7 +619,7 @@ class TrainingTask(object):
         counts = {}
         # concurrency is implemented by test tasks (trainer.test_on_key)
         for height in self.heights:
-            count = self.trainer.test_only(test_set_index, height=height)
+            count = self.trainer.test_only(test_set_index, height=height, **kwargs)
             counts[height] = count
 
         t1 = time.perf_counter()
@@ -784,6 +791,7 @@ if __name__ == '__main__':
     print("Task 1: RCD+SuperFlux")
     task_sf = TrainingTask(features=['rcd', 'superflux'])
     task_sf.train_and_test_8_fold(save_model=True)
+    task_sf.train_and_test_model(combine_output_onsets=False)
     print("Task 2: SuperFlux (baseline)")
     task_sf = TrainingTask(features=['superflux'])
     task_sf.train_and_test_8_fold(save_model=True)
