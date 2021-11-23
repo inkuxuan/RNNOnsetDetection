@@ -42,11 +42,6 @@ ONSET_DELTA = 0.030
 TARGET_MODE = 'linear'
 DEFAULT_FEATURES = ['rcd', 'superflux']
 
-INITIAL_LR = 1e-3
-GAMMA = 0.8
-SCHEDULER_PATIENCE = 10
-EARLY_STOP_PATIENCE = 50
-MAX_EPOCH = 5000
 # function reference for onset combiner
 # in [onsets.combine_onsets_avg, onsets.merge_onsets, None]
 # stands for combining onsets by average, by the first onset, and no combination
@@ -221,10 +216,10 @@ class TrainingConfig(object):
                  scheduler_constructor=None,
                  scheduler_args=None,
                  scheduler_kwargs=None,
-                 epoch=MAX_EPOCH,
+                 epoch=5000,
                  batch_size=64,
                  loss_fn=None,
-                 early_stop_patience=EARLY_STOP_PATIENCE):
+                 early_stop_patience=50):
         r"""
 
         :param weight: weight for positive class
@@ -235,7 +230,7 @@ class TrainingConfig(object):
         :param epoch: maximum no of epochs
         :param batch_size: minibatch size
         :param loss_fn: loss function (instance)
-        :param early_stop_patience: epochs to wait until early stop
+        :param early_stop_patience: epochs to wait until early stop. If set to 0, early stopping won't be performed
         """
         self.scheduler_kwargs = scheduler_kwargs
         self.scheduler_args = scheduler_args
@@ -437,7 +432,6 @@ class ModelManager(object):
                        validation_keys: list,
                        batch_size=CPU_CORES,
                        verbose=True,
-                       early_stopping=True,
                        save_checkpoint=True,
                        **kwargs):
         r"""
@@ -445,7 +439,6 @@ class ModelManager(object):
 
         -----
         :param save_checkpoint: if being True or a str, constantly saves the model to a file
-        :param early_stopping: whether or not to perform early stopping according to patience set when initialized
         :param validation_keys: list of keys in validation set
         :param training_keys: list of keys in training set
         :param batch_size: How many pieces at a time to train the network.
@@ -462,8 +455,9 @@ class ModelManager(object):
         valid_loss_record = []
         best_valid_loss = float('inf')
         checkpoint = self.model.state_dict()
-        if early_stopping:
-            early_stopping = utils.EarlyStopping(patience=EARLY_STOP_PATIENCE)
+        early_stopping = False
+        if self.training_config.early_stop_patience > 0:
+            early_stopping = utils.EarlyStopping(patience=self.training_config.early_stop_patience)
         while continue_epoch:
             epoch_now += 1
             print(f"===EPOCH {epoch_now}===")
@@ -813,10 +807,14 @@ def test_cp(filename, height):
 
 
 def train_adam():
-    features = ['superflux']
+    features = ['rcd', 'superflux']
     global TARGET_MODE
     TARGET_MODE = 'linear'
-    trainer = ModelManager(datasets.BockSet(), ModelConfig(features=features), TrainingConfig())
+    trainer = ModelManager(datasets.BockSet(), ModelConfig(features=features, num_layer_unit=6), TrainingConfig())
+    task = TrainingTask(trainer)
+    task.train_and_test_model(initialize=False, save_model=True, save_checkpoint=True)
+
+    trainer = ModelManager(datasets.BockSet(), ModelConfig(features=features, num_layer_unit=8), TrainingConfig())
     task = TrainingTask(trainer)
     task.train_and_test_model(initialize=False, save_model=True, save_checkpoint=True)
 
