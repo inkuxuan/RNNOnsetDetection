@@ -31,7 +31,7 @@ def plot_music_net_roll(labels_, sr, start=0, end=30):
     plt.show()
 
 
-def plot_odf(odf, title="ODF", onset_target=None, onsets=None):
+def plot_odf(odf, title="ODF", onset_target=None, onsets=None, figsize=(14.4, 4.8)):
     r"""
 
     :param odf: Onset Detection Function, with frames in the first axis
@@ -40,7 +40,7 @@ def plot_odf(odf, title="ODF", onset_target=None, onsets=None):
     :param onsets: Onsets, in list of frame numbers, will be plotted as vertical lines
     :return:
     """
-    plt.figure(figsize=(14.4, 4.8), dpi=100)
+    plt.figure(figsize=figsize, dpi=100)
     plt.plot(odf)
     if onset_target is not None:
         plt.plot(onset_target, color='red', alpha=0.3)
@@ -66,6 +66,16 @@ def test_with_key(key, start, stop):
     wave, onsets, sr = piece.get_data()
     plot_music_net_roll(piece.get_raw_labels(), sr, start=start, end=stop)
 
+
+def normalize_wav(wav, type='float32'):
+    r"""
+    normalizes a wave 1d-array into range [-1, 1]
+    """
+    abs_max = np.max((abs(np.max(wav)), abs(np.min(wav))))
+    wav = np.array(wav)
+    wav = wav / abs_max
+    wav = wav.astype(type)
+    return wav
 
 class EarlyStopping(object):
     def __init__(self, patience=20, min_improvement=0.):

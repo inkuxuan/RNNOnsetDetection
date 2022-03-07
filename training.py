@@ -3,7 +3,7 @@ import random
 import boeck.onset_program
 import datasets
 import networks
-import onsets
+import onset_utils
 import onset_functions
 import utils
 
@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from itertools import repeat
 import multiprocessing
 import gc
-import os
+import pathlib
 
 import librosa
 import scipy.signal
@@ -36,25 +36,32 @@ CACHED_PREPROCESSING = True
 
 SAMPLING_RATE = 44100
 N_FFT = 2048
-HOP_SIZE = 441
+HOP_SIZE = 220.5
+# onsets within what time is merged into one
 ONSET_DELTA = 0.030
 # in ['single', 'linear']
-TARGET_MODE = 'linear'
+TARGET_MODE = 'single'
+# how many non-zero target frames should be generated around an onset (each side)
+# only used when TARGET_MODE == 'linear'
+TARGET_DELTA = 2
 DEFAULT_FEATURES = ['rcd', 'superflux']
 
 # function reference for onset combiner
 # in [onsets.combine_onsets_avg, onsets.merge_onsets, None]
 # stands for combining onsets by average, by the first onset, and no combination
-COMBINE_ONSETS = onsets.combine_onsets_avg
+COMBINE_ONSETS = onset_utils.combine_onsets_avg
 COMBINE_ONSETS_DETECTION = True
 
 now = datetime.now()
 dstr = now.strftime("%Y%m%d %H%M%S")
 RUN_DIR = f'run {dstr}/'
-os.makedirs(RUN_DIR)
 
 
-def get_features(wave, features=None, n_fft=N_FFT, hop_size=HOP_SIZE, sr=SAMPLING_RATE, center=False) -> np.ndarray:
+# ---------------HELPER FUNCTIONS----------------
+
+
+def get_features(wave, features=None, n_fft=N_FFT, hop_size=HOP_SIZE, sr=SAMPLING_RATE, center=False,
+                 online=False) -> np.ndarray:
     r"""
     :param center: Leave this to False, this will disable librosa's centering feature
     :param sr: sampling rate
@@ -65,18 +72,18 @@ def get_features(wave, features=None, n_fft=N_FFT, hop_size=HOP_SIZE, sr=SAMPLIN
     :return: ndarray, axis 0 being feature type, axis 1 being the length of a sequence
     """
     if features is None:
-        features = ['rcd', 'superflux']
-    stft = librosa.stft(wave, n_fft=n_fft, hop_length=hop_size, center=center)
+        features = DEFAULT_FEATURES
+    stft = onset_functions.stft(wave, n_fft=n_fft, hop_length=hop_size, online=online)
     f = []
     for feature in features:
         if feature in ['complex_domain', 'cd']:
-            onset_strength = onset_functions.complex_domain_odf(stft)
+            onset_strength = onset_functions.complex_domain_odf(stft, rectify=False)
             f.append(onset_strength)
         elif feature in ['rectified_complex_domain', 'rcd']:
             onset_strength = onset_functions.complex_domain_odf(stft, rectify=True)
             f.append(onset_strength)
         elif feature in ['super_flux', 'superflux']:
-            onset_strength, _, _ = onset_functions.super_flux_odf(stft, sr, n_fft, hop_size, center)
+            onset_strength, _, _ = onset_functions.super_flux_odf(stft, sr)
             f.append(onset_strength)
     return np.asarray(f)
 
@@ -85,7 +92,17 @@ odfs_cache = {}
 features_cache = {}
 
 
-def prepare_data(boeck_set, features, key):
+def normalize_odf(odfs):
+    r"""
+    This normalize the second dimension in an nd-array to range [0,1]
+    """
+    for i in range(odfs.shape[1]):
+        max_value = np.max(odfs[:, i])
+        odfs[:, i] = odfs[:, i] / max_value
+    return odfs
+
+
+def prepare_data(boeck_set, features, key, normalize=True):
     r"""
     Notice that odfs is in shape (length, n_features), target is in shape (length)
 
@@ -93,6 +110,7 @@ def prepare_data(boeck_set, features, key):
     """
     piece = boeck_set.get_piece(key)
     wave, onsets_list, sr = piece.get_data()
+    wave = utils.normalize_wav(wave, type='float')
     if COMBINE_ONSETS:
         onsets_list = COMBINE_ONSETS(piece.get_onsets_seconds(), ONSET_DELTA)
     # convert from second to sample
@@ -106,9 +124,7 @@ def prepare_data(boeck_set, features, key):
         # arrange dimensions so that the model can accept (shape==[seq_len, n_feature])
         odfs = odfs.T
         # Normalize the odfs along each feature so that they range from 0 to 1
-        for i in range(odfs.shape[1]):
-            max_value = np.max(odfs[:, i])
-            odfs[:, i] = odfs[:, i] / max_value
+        odfs = normalize_odf(odfs)
         if CACHED_PREPROCESSING:
             # save transposed odfs
             odfs_cache[key] = odfs
@@ -116,10 +132,12 @@ def prepare_data(boeck_set, features, key):
             # Prevent from memory overflowing
             gc.collect()
     length = odfs.shape[0]
-    target = onsets.onset_list_to_target(onsets_list, HOP_SIZE, length, ONSET_DELTA * sr / HOP_SIZE, key=key,
-                                         mode=TARGET_MODE)
+    target = onset_utils.onset_list_to_target(onsets_list, HOP_SIZE, length, ONSET_DELTA * sr / HOP_SIZE, key=key,
+                                              mode=TARGET_MODE)
     return length, odfs, target, onsets_list, len(wave) / sr
 
+
+# ---------------CLASSES----------------
 
 class BoeckDataLoader(object):
     r"""
@@ -280,13 +298,24 @@ class ModelManager(object):
         self.loss_fn = self.training_config.loss_fn
         if self.loss_fn is None:
             self.loss_fn = nn.BCEWithLogitsLoss()
-        self.optimizer = self.training_config.optimizer(self.model.parameters(),
-                                                        *self.training_config.optimizer_args,
-                                                        **self.training_config.optimizer_kwargs)
+        if self.training_config.optimizer_args and self.training_config.optimizer_kwargs:
+            self.optimizer = self.training_config.optimizer(self.model.parameters(),
+                                                            *self.training_config.optimizer_args,
+                                                            **self.training_config.optimizer_kwargs)
+        elif self.training_config.optimizer_kwargs:
+            self.optimizer = self.training_config.optimizer(self.model.parameters(),
+                                                            **self.training_config.optimizer_kwargs)
+        else:
+            self.optimizer = self.training_config.optimizer(self.model.parameters())
+        self.scheduler = None
         if self.training_config.scheduler_constructor:
-            self.scheduler = self.training_config.scheduler_constructor(self.optimizer,
-                                                                        *self.training_config.scheduler_args,
-                                                                        **self.training_config.scheduler_kwargs)
+            if self.training_config.scheduler_args and self.training_config.scheduler_kwargs:
+                self.scheduler = self.training_config.scheduler_constructor(self.optimizer,
+                                                                            *self.training_config.scheduler_args,
+                                                                            **self.training_config.scheduler_kwargs)
+            elif self.training_config.scheduler_kwargs:
+                self.scheduler = self.training_config.scheduler_constructor(self.optimizer,
+                                                                            **self.training_config.scheduler_kwargs)
 
     def initialize_model(self):
         self.model.init_normal()
@@ -303,6 +332,7 @@ class ModelManager(object):
             if self.model.recurrent.bidirectional:
                 filename += '(bi)'
             filename += '.pt'
+        pathlib.Path(RUN_DIR).mkdir(parents=True, exist_ok=True)
         torch.save(self.model, RUN_DIR + filename)
 
     def save_cp(self, filename):
@@ -311,6 +341,7 @@ class ModelManager(object):
             'optimizer': self.optimizer.state_dict() if self.optimizer else None,
             'scheduler': self.scheduler.state_dict() if self.scheduler else None
         }
+        pathlib.Path(RUN_DIR).mkdir(parents=True, exist_ok=True)
         torch.save(checkpoint, RUN_DIR + filename)
 
     def load(self, path):
@@ -352,8 +383,12 @@ class ModelManager(object):
             if key is not None:
                 _, odfs, _, _, audio_len = prepare_data(self.boeck_set, self.features, key)
             elif wave is not None:
-                odfs = get_features(wave, self.features, hop_size=hop_size, n_fft=n_fft, sr=sr)
+                wave = utils.normalize_wav(wave)
+                odfs = get_features(wave, features=self.features,
+                                    hop_size=hop_size, n_fft=n_fft, sr=sr, center=False)
                 audio_len = len(wave) / float(sr)
+                odfs = odfs.T
+                odfs = normalize_odf(odfs)
             else:
                 raise ValueError("either a key or a wave array should be specified")
             t1 = time.perf_counter()
@@ -380,7 +415,7 @@ class ModelManager(object):
         :param wave: a wave audio in 1-d array
         :param key: key of the track
         :param height: minimum height of a peak
-        :return: Seconds of onsets, not combined
+        :return: onsets in seconds, not combined
         """
         out = self.predict(key=key, wave=wave, **kwargs)
         out = out.squeeze()
@@ -430,7 +465,6 @@ class ModelManager(object):
     def train_on_split(self,
                        training_keys: list,
                        validation_keys: list,
-                       batch_size=CPU_CORES,
                        verbose=True,
                        save_checkpoint=True,
                        **kwargs):
@@ -441,12 +475,11 @@ class ModelManager(object):
         :param save_checkpoint: if being True or a str, constantly saves the model to a file
         :param validation_keys: list of keys in validation set
         :param training_keys: list of keys in training set
-        :param batch_size: How many pieces at a time to train the network.
         Training process uses concurrency for both pre-processing and training. This is default the cores count of CPU.
         :param verbose: bool, Print debug outputs
         :return: dict containing {loss_record, valid_loss_record, epoch_now, lr, best_state_dict}
         """
-        loader = BoeckDataLoader(self.boeck_set, training_keys, batch_size, features=self.features)
+        loader = BoeckDataLoader(self.boeck_set, training_keys, self.training_config.batch_size, features=self.features)
         valid_loader = BoeckDataLoader(self.boeck_set, validation_keys, len(validation_keys), features=self.features)
         self.model.train()
         continue_epoch = True
@@ -460,12 +493,13 @@ class ModelManager(object):
             early_stopping = utils.EarlyStopping(patience=self.training_config.early_stop_patience)
         while continue_epoch:
             epoch_now += 1
-            print(f"===EPOCH {epoch_now}===")
-            print(f"lr={self.optimizer.param_groups[0]['lr']}")
-            avg_loss = self._fit(epoch_now, loader, verbose)
-            loss_record.append(avg_loss)
             if self.training_config.epoch and epoch_now >= self.training_config.epoch:
                 continue_epoch = False
+            print(f"===EPOCH {epoch_now}===")
+            print(f"lr={self.optimizer.param_groups[0]['lr']}")
+            # FIT THE MODEL
+            avg_loss = self._fit(epoch_now, loader, verbose)
+            loss_record.append(avg_loss)
             # VALIDATION
             valid_loss = self._validate_loss(epoch_now, valid_loader)
             valid_loss_record.append(valid_loss)
@@ -474,6 +508,7 @@ class ModelManager(object):
                 self.scheduler.step()
             # Checkpoint saving
             if valid_loss < best_valid_loss:
+                best_valid_loss = valid_loss
                 checkpoint = self.model.state_dict()
                 if save_checkpoint:
                     if isinstance(save_checkpoint, str):
@@ -538,7 +573,7 @@ class ModelManager(object):
                 print(f"Valid_loss: {loss.item():>7f}")
             return avg_loss / track_count
 
-    def train_only(self, test_split_index, verbose=False, **kwargs):
+    def train_only(self, test_split_index, verbose=True, **kwargs):
         r"""
         :return: dict containing {loss_record, valid_loss_record, epoch_now, lr, best_state_dict}
         """
@@ -546,7 +581,7 @@ class ModelManager(object):
         info = self.train_on_split(training_keys, validation_keys, verbose=verbose, **kwargs)
         return info
 
-    def train_and_test(self, test_split_index, verbose=False, online=False, height=0.5, window=0.025, delay=0,
+    def train_and_test(self, test_split_index, verbose=True, online=False, height=0.5, window=0.025, delay=0,
                        **kwargs):
         r"""
 
@@ -577,7 +612,7 @@ class ModelManager(object):
                                  height=height, window=window, delay=delay, **kwargs)
 
     def test_on_keys(self, keys, online=False, combine_output_onsets=COMBINE_ONSETS_DETECTION,
-                     height=0.5, window=0.025, delay=0,
+                     height=0.35, window=0.025, delay=0,
                      concurrent=True, **kwargs):
         r"""
 
@@ -608,7 +643,7 @@ class ModelManager(object):
         return count
 
     def test_on_key(self, key, online=False, combine_output_onsets=COMBINE_ONSETS_DETECTION,
-                    height=0.5, window=0.025, delay=0, **kwargs):
+                    height=0.35, window=0.025, delay=0, **kwargs):
         ground_truth = self.boeck_set.get_piece(key).get_onsets_seconds()
         if online:
             detections = self.predict_onsets_online(key=key, height=height, **kwargs)
@@ -620,6 +655,30 @@ class ModelManager(object):
             ground_truth = COMBINE_ONSETS(ground_truth, ONSET_DELTA)
         count = boeck.onset_evaluation.count_errors(detections, ground_truth, window, delay=delay)
         return count
+
+    def speed_test_on_keys(self, keys, online=False,
+                           combine_output_onsets=COMBINE_ONSETS_DETECTION, height=0.35):
+        r"""
+
+        :return: processing speed (times of processing audio)
+        """
+        # calculate total length
+        total_len = 0.
+        for key in keys:
+            samples = len(self.boeck_set.get_piece(key).get_wave())
+            length = samples / SAMPLING_RATE
+            total_len += length
+        t1 = time.perf_counter()
+        # speed test
+        for key in keys:
+            if online:
+                detections = self.predict_onsets_online(key=key, height=height)
+            else:
+                detections = self.predict_onsets_offline(key=key, height=height)
+            if combine_output_onsets and not online:
+                detections = COMBINE_ONSETS(detections, ONSET_DELTA)
+        t2 = time.perf_counter()
+        return total_len / (t2 - t1)
 
 
 class TrainingTask(object):
@@ -635,7 +694,7 @@ class TrainingTask(object):
         now = datetime.now()
         dstr = now.strftime("%Y%m%d %H%M%S")
         self.report_dir = RUN_DIR + f'report {dstr}/'
-        os.makedirs(self.report_dir)
+        # os.makedirs(self.report_dir)
         self.boeck_set = datasets.BockSet()
         self.trainer = trainer
 
@@ -694,6 +753,7 @@ class TrainingTask(object):
         t1 = time.perf_counter()
         print(f"Evaluation done. Time elapsed {t1 - t0:.2f}s")
         # report
+        pathlib.Path(self.report_dir).mkdir(parents=True, exist_ok=True)
         with open(self.report_dir + filename, 'w') as file:
             file.write("Training and Test Report\n")
             self._write_report_parameters(file, self.trainer.model_config, self.trainer.training_config,
@@ -727,6 +787,8 @@ class TrainingTask(object):
                 if counts.get(result[0]) is None:
                     counts[result[0]] = Counter()
                 counts[result[0]] += result[1]
+
+        pathlib.Path(self.report_dir).mkdir(parents=True, exist_ok=True)
         with open(self.report_dir + filename, 'w') as file:
             file.write("Training and 8-fold Test Report\n")
             self._write_report_parameters(file, self.trainer.model_config, self.trainer.training_config)
@@ -748,16 +810,16 @@ class TrainingTask(object):
     def _write_report_parameters(file, model_config, training_config,
                                  epoch_now=0, lr_now=0., valid_loss=None):
         file.write("[Parameters]\n")
-        file.write(f"{model_config}\n")
-        file.write(f"{training_config}\n")
+        file.write(f"{vars(model_config)}\n")
+        file.write(f"{vars(training_config)}\n")
         file.write(f"last learning rate: {lr_now}\n")
         # file.write(f"scheduler gamma: {gamma}\n")
-        file.write(f"epochs: {epoch_now}")
+        file.write(f"epochs: {epoch_now}\n")
         if valid_loss:
             file.write(f"Loss(valid): {valid_loss}\n")
 
 
-def test_output(mgr, test_key):
+def test_output(mgr, test_key, figsize=(14.4, 4.8)):
     boeck_set = datasets.BockSet()
 
     piece = boeck_set.get_piece(test_key)
@@ -769,18 +831,18 @@ def test_output(mgr, test_key):
     output = output.squeeze()
     output = output.T
     output = output.cpu()
-    utils.plot_odf(output, title="Network(Trained)", onsets=onsets_list)
+    utils.plot_odf(output, title="Network(Trained)", onsets=onsets_list, figsize=figsize)
 
-    length, odfs, target, onsets_samples, audio_len = prepare_data(boeck_set, mgr.features, test_key)
-    utils.plot_odf(odfs, title="SuperFlux")
-    utils.plot_odf(target, title="Target")
+    # length, odfs, target, onsets_samples, audio_len = prepare_data(boeck_set, mgr.features, test_key)
+    # utils.plot_odf(odfs, title="SuperFlux")
+    # utils.plot_odf(target, title="Target")
 
 
 def test_saved_model(filename, features=None, height=0.35):
     boeck_set = datasets.BockSet()
     model = torch.load(filename, map_location=networks.device)
     mgr = ModelManager(boeck_set, ModelConfig(features=features), TrainingConfig())
-    mgr.model = model
+    mgr.load_state_dict(model.state_dict())
     test_output(mgr, boeck_set.splits[0][0])
     counter = mgr.test_on_keys(boeck_set.get_split(0), height=height)
     print(f"Precision {counter.precision}, Recall {counter.recall}, F-score {counter.fmeasure}")
@@ -809,24 +871,42 @@ def test_cp(filename, height):
 def train_adam():
     features = ['rcd', 'superflux']
     global TARGET_MODE
-    TARGET_MODE = 'linear'
-    trainer = ModelManager(datasets.BockSet(), ModelConfig(features=features, num_layer_unit=6), TrainingConfig())
-    task = TrainingTask(trainer)
-    task.train_and_test_model(initialize=False, save_model=True, save_checkpoint=True)
+    TARGET_MODE = 'single'
 
-    trainer = ModelManager(datasets.BockSet(), ModelConfig(features=features, num_layer_unit=8), TrainingConfig())
+    trainer = ModelManager(datasets.BockSet(), ModelConfig(features=['superflux']), TrainingConfig())
     task = TrainingTask(trainer)
-    task.train_and_test_model(initialize=False, save_model=True, save_checkpoint=True)
+    task.train_and_test_8_fold()
+
+    # trainer = ModelManager(datasets.BockSet(), ModelConfig(features=['superflux']), TrainingConfig())
+    # task = TrainingTask(trainer)
+    # task.train_and_test_model(initialize=False, save_model=True,
+    #                           save_checkpoint="cp-spf.pt", filename="Report-spf.txt")
+    #
+    # trainer = ModelManager(datasets.BockSet(), ModelConfig(features=features), TrainingConfig())
+    # task = TrainingTask(trainer)
+    # task.train_and_test_model(initialize=False, save_model=True,
+    #                           save_checkpoint="cp-rcd+spf.pt", filename="Report-rcd+spf.txt")
+    #
+    # trainer = ModelManager(datasets.BockSet(), ModelConfig(features=features, num_layer_unit=6), TrainingConfig(), )
+    # task = TrainingTask(trainer)
+    # task.train_and_test_model(initialize=False, save_model=True,
+    #                           save_checkpoint="cp-2x6.pt", filename="Report-2x6.txt")
+    #
+    # trainer = ModelManager(datasets.BockSet(), ModelConfig(features=features, num_layer_unit=8), TrainingConfig(), )
+    # task = TrainingTask(trainer)
+    # task.train_and_test_model(initialize=False, save_model=True,
+    #                           save_checkpoint="cp-2x8.pt", filename="Report-2x8.txt")
+
+
+def speed_test(filename, features):
+    global CACHED_PREPROCESSING
+    CACHED_PREPROCESSING = False
+    networks.device = torch.device('cpu')
+    trainer = ModelManager(datasets.BockSet(), ModelConfig(features=features), TrainingConfig(),
+                           load_file=filename)
+    speed = trainer.speed_test_on_keys(datasets.BockSet().get_split(0))
+    print(f"{speed}x")
 
 
 if __name__ == '__main__':
-    # print("Task 1: RCD+SuperFlux")
-    # task_sf = TrainingTask(features=['rcd', 'superflux'])
-    # task_sf.train_and_test_model(save_model=True)
-    # print("Task 2: SuperFlux (baseline)")
-    # task_sf = TrainingTask(features=['superflux'])
-    # task_sf.train_and_test_model(save_model=True, save_checkpoint=True)
-    # print("Task 3: RCD+SuperFlux (8x2)")
-    # task_sf = TrainingTask(features=['rcd', 'superflux'], n_layers=2, n_units=8)
-    # task_sf.train_and_test_model(save_model=True)
     train_adam()

@@ -1,14 +1,19 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import librosa
+from scipy.ndimage import maximum_filter1d
+from scipy.ndimage import uniform_filter1d
 
+import boeck.onset_evaluation
 import datasets
 import utils
+from boeck.onset_evaluation import Counter
 
 
 def complex_domain_odf(stft, aggregate=np.mean, rectify=True):
     r"""
     Calculate onset and offset strength array from the stft frames
-    This implementation is derived from Boeck's
 
     ------
     :param rectify: apply rectification that only preserve rising magnitude
@@ -104,6 +109,10 @@ def _tonal_filter_bank(
         normalized_filters=False):
     r"""
     Create a filterbank for spectrogram matrix calculation, filters evenly placed in equal temperament.
+    "Maximum Filter Vibrato Suppression for Onset Detection"
+    Sebastian Böck and Gerhard Widmer.
+    Proceedings of the 16th International Conference on Digital Audio Effects
+    (DAFx-13), Maynooth, Ireland, September 2013.
 
     ------
     :param n_fft_bins: the height of a stft
@@ -162,22 +171,21 @@ def tonal_spectrogram(stft, filter_bank=None, power_spectrum=False):
 def super_flux_odf(
         stft,
         sr,
-        n_fft,
-        hop_size,
-        center=False,
-        lag=1,
+        lag=2,
         filter_bank=None,
         bands_per_octave=24,
         f_min=27.5,
         f_max=17000,
         normalized_filters=False,
         max_size=3,
-        power_spectrum=False
+        power_spectrum=False,
+        keep_dims=True,
+        aggregate=np.mean
 ):
     r"""
-    Compute a Super Flux onset strength function.
+    Compute a SuperFlux onset strength function.
 
-    This includes computing a tone based spectrogram using a filter bank,
+    This includes computing a western scale based spectrogram using a filter bank,
     applying maximum filter on the reference spectrogram,
     taking the difference in the specified lag, and finally pad the onset envelop
     to compensate the stft hop-size effect.
@@ -188,11 +196,8 @@ def super_flux_odf(
            Maynooth, Ireland. 2013.
 
     ------
-    :param stft: the stft frames
+    :param stft: the stft frames with shape (frequency_bin, time_frame)
     :param sr: sample rate of the audio (used to calculate filter banks)
-    :param n_fft: the stft window size (for frame compensation)
-    :param hop_size: the stft hop length (for frame compensation)
-    :param center: to pad the odf by ``n_fft // (2 * hop_size)`` frames
     :param lag: to which the different is taken in the spectrogram
     :param filter_bank: used to calculate the spectrogram if specified
     :param bands_per_octave: number of filter bank sub-band per octave
@@ -202,6 +207,8 @@ def super_flux_odf(
     :param max_size: the size of the maximum filter
     :param power_spectrum: if set to True, the stft frame is powered first,
         and the spectrogram is taken decibel rather than magnitude
+    :param keep_dims: if set to True, the returned odf keeps the same length (in time) as the input stft
+    :param aggregate: the aggregation function to be applied to the final difference
     :return: (onset_strength, filter_bank, tonal_spectrogram), onset strength function in a 1d-array
     """
     if filter_bank is None:
@@ -214,14 +221,27 @@ def super_flux_odf(
             f_max=f_max,
             normalized_filters=normalized_filters)
     spectrogram = tonal_spectrogram(stft, filter_bank=filter_bank, power_spectrum=power_spectrum)
-    # librosa here use differential operation to compute onset envelope,
-    # apply the maximum filter,
-    # if center=True, it will pad the onset envelope
-    # by ``n_fft // (2 * hop_size)`` frames
-    # to compensate the sftf and hop-size effect (here default is set to False)
-    onset_strength = librosa.onset.onset_strength(
-        sr=sr, S=spectrogram, lag=lag, max_size=max_size, center=center,
-        n_fft=n_fft, hop_length=hop_size)
+
+    # apply maximum filter on the reference spectrogram
+    if max_size > 1:
+        # apply max filter
+        from scipy.ndimage.filters import maximum_filter
+        size = (max_size, 1)
+        ref_spectrogram = maximum_filter(spectrogram, size=size)
+    else:
+        ref_spectrogram = spectrogram
+
+    # calculate the difference between the reference spectrogram and the original spectrogram
+    if keep_dims:
+        diff = np.zeros_like(spectrogram)
+        diff[:, lag:] = spectrogram[:, lag:] - ref_spectrogram[:, :-lag]
+    else:
+        diff = spectrogram[:, lag:] - ref_spectrogram[:, :-lag]
+
+    # keep only the positive differences
+    diff = np.maximum(diff, 0)
+    onset_strength = aggregate(diff, axis=0)
+
     return onset_strength, filter_bank, spectrogram
 
 
@@ -255,7 +275,7 @@ def _main():
     x = x[idx]
     stft = librosa.stft(x, n_fft=n_fft, hop_length=hop_length)
     odf = complex_domain_odf(stft)
-    sf, filter_bank, tonal_spec = super_flux_odf(stft, sr, n_fft, hop_length)
+    sf, filter_bank, tonal_spec = super_flux_odf(stft, sr, )
 
     mel_onset = mel_filter_onset_strength(stft, sr, n_fft, hop_length)
 
@@ -307,10 +327,219 @@ def test_cd():
     stft = librosa.stft(wave, n_fft=2048, hop_length=441, center=False)
     cd = complex_domain_odf(stft, rectify=False)
     rcd = complex_domain_odf(stft, rectify=True)
+    sf, _, _ = super_flux_odf(stft, sr)
     onset_frames = librosa.samples_to_frames(onsets, 441, n_fft=2048)
     utils.plot_odf(cd[200:400], title="CD")
     utils.plot_odf(rcd[200:400], title="RCD")
+    utils.plot_odf(sf[200:400], title="SuperFlux")
+
+
+def sf_peak_picking(odf, sr, hop_length, pre_max=0.03, post_max=0.03,
+                    pre_avg=0.1, post_avg=0.07, delta=0.1,
+                    combine_width=0.03):
+    # Implementation by Boeck https://github.com/CPJKU/SuperFlux/
+    # Maximum Filter Vibrato Suppression for Onset Detection (Boeck et al., 2013)
+    frame_rate = float(sr) / hop_length
+    # convert timing information to frames
+    pre_avg = int(round(frame_rate * pre_avg))
+    pre_max = int(round(frame_rate * pre_max))
+    post_max = int(round(frame_rate * post_max))
+    post_avg = int(round(frame_rate * post_avg))
+    # init detections
+    detections = []
+    # moving maximum
+    max_length = pre_max + post_max + 1
+    max_origin = int(np.floor((pre_max - post_max) / 2))
+    mov_max = maximum_filter1d(odf, max_length,
+                               mode='constant', origin=max_origin)
+    # moving average
+    avg_length = pre_avg + post_avg + 1
+    avg_origin = int(np.floor((pre_avg - post_avg) / 2))
+    mov_avg = uniform_filter1d(odf, avg_length,
+                               mode='constant', origin=avg_origin)
+    # detections are activation equal to the moving maximum
+    detections = odf * (odf == mov_max)
+    # detections must be greater or equal than the mov. average + threshold
+    detections *= (detections >= mov_avg + delta)
+    # convert detected onsets to a list of timestamps
+    detections = np.nonzero(detections)[0].astype('float') / frame_rate
+    # always use the first detection and all others if none was reported
+    # within the last `combine` seconds
+    if detections.size > 1:
+        # filter all detections which occur within `combine` seconds
+        detections = detections[1:][np.diff(detections) > combine_width]
+    return detections
+
+
+def test_superflux_f_score(n_fft=2048, hop_length=220.5, lag=2,
+                           pre_max=0.03, post_max=0.03,
+                           pre_avg=0.1, post_avg=0.07, delta=0.1,
+                           combine_width=0.03, offset=0.0,
+                           eval_window=0.25):
+    r"""
+    test f-score on the boeck dataset using SuperFlux ODF
+    """
+    # load data
+    boeck_set = datasets.BockSet()
+    splits = boeck_set.get_splits()
+    # load all splits into a single list
+    keys = splits[0] + splits[1] + splits[2] + splits[3] + splits[4] + splits[5] + splits[6] + splits[7]
+    count = Counter()
+    for key in keys:
+        onsets, detections = superflux_detections(key, n_fft=n_fft, hop_length=hop_length, lag=lag,
+                                                  pre_max=pre_max, post_max=post_max,
+                                                  pre_avg=pre_avg, post_avg=post_avg, delta=delta,
+                                                  combine_width=combine_width, offset=offset)
+        # merge close onsets
+        onsets = boeck.onset_evaluation.combine_events(onsets, combine_width)
+        # calculate f-score
+        count += boeck.onset_evaluation.count_errors(detections, onsets, eval_window)
+    print(f"delta: {delta}. f-score: {count.fmeasure}")
+
+
+def superflux_detections(key, n_fft=2048, hop_length=220.5, lag=2,
+                         pre_max=0.03, post_max=0.03,
+                         pre_avg=0.1, post_avg=0.07, delta=0.1,
+                         combine_width=0.03, offset=0.):
+    boeck_set = datasets.BockSet()
+    track = boeck_set.get_piece(key)
+    wave = track.get_wave()
+    wave = utils.normalize_wav(wave, 'float')
+    ground_truth = track.get_onsets_seconds()
+    sr = track.get_sr()
+    stft_f = stft(wave, n_fft=n_fft, hop_length=hop_length)
+    sf, _, _ = super_flux_odf(stft_f, sr, lag=lag)
+    # peak-picking
+    detections = sf_peak_picking(sf, sr, hop_length, pre_max=pre_max, post_max=post_max, pre_avg=pre_avg,
+                                 post_avg=post_avg, delta=delta, combine_width=combine_width)
+    if offset != 0:
+        detections += offset
+    return ground_truth, detections
+
+
+def stft(wave, n_fft=2048, hop_length=220.5, online=False, include_dc=False):
+    r"""
+    This is implemented to ensure the same performance as
+
+    .. [#] Böck, Sebastian, and Gerhard Widmer.
+           "Maximum filter vibrato suppression for onset detection."
+           16th International Conference on Digital Audio Effects,
+           Maynooth, Ireland. 2013.
+
+    Refer to https://github.com/CPJKU/SuperFlux/blob/master/SuperFlux.py
+
+    :param wave: input wave
+    :param n_fft: the length of the FFT window (hanning window)
+    :param hop_length: the hop size, can be a float in order to match an integer fps
+    :param online: online mode (but see comments for explanations on why this is NOT online)
+    :param include_dc: whether to include the DC component in the STFT (to include frequency bin #0)
+    :return: the STFT frames with shape (frequency_bin, frame)
+    """
+    import scipy.fft as fft
+    n_samples = len(wave)
+    n_frames = int(np.ceil(len(wave) / hop_length))
+    # NOTE that here n_fft_bins is not `n_fft // 2 + 1`
+    # because only this many bins are used in the referred paper
+    # However see below the `FFT` part for a difference in the implementation
+    n_fft_bins = int(n_fft / 2)
+    if include_dc:
+        n_fft_bins += 1
+    window = np.hanning(n_fft)
+    # in case the wave is in int
+    try:
+        int_max = np.iinfo(wave.dtype).max
+        window /= int_max
+    except ValueError:
+        pass
+    # init frames
+    stft_frames = np.empty((n_fft_bins, n_frames), dtype='complex')
+    for frame in range(n_frames):
+        # seek position
+        if online:
+            # move 1 hop_length forward, and then step one n_fft back
+            # this result in the frame position being at the start of the "new" contents of the frame
+            # NOTE that this does NOT actually make future information unavailable (by stepping one hop_length forward)
+            # Therefore the referred paper is not accurate on the description of "online"
+            seek = int((frame + 1) * hop_length - n_fft)
+        else:
+            # move 1 hop_length back, and then step half n_fft back
+            # so that the frame position represents the center of a frame
+            seek = int(frame * hop_length - n_fft / 2)
+        if seek >= n_samples:
+            # EOF
+            break
+        elif seek + n_fft > n_samples:
+            # signal too short for the frame, append zeros
+            zeros = np.zeros(seek + n_fft - n_samples)
+            signal = wave[seek:]
+            signal = np.append(signal, zeros)
+        elif seek < 0:
+            # start before the signal, pad zeros
+            zeros = np.zeros(-seek)
+            signal = wave[:seek + n_fft]
+            signal = np.append(zeros, signal)
+        else:
+            signal = wave[seek:seek + n_fft]
+        # apply window
+        signal = signal * window
+        # FFT
+        if include_dc:
+            # bin [0:n_fft_bins+1]
+            stft_frames[:, frame] = fft.rfft(signal)[:]
+        else:
+            # NOTE that here the referred paper used `fft.fft(signal)[:n_fft_bins]` which includes the DC bin
+            # which is not correct
+            # Here we use the 1-D FFT for Real input and discard the DC bin
+            # [1:n_fft_bins+1]
+            stft_frames[:, frame] = fft.rfft(signal)[1:]
+    return stft_frames
+
+
+def test_superflux_detections(delta=0.1):
+    boeck = datasets.BockSet()
+    splits = boeck.splits
+    key = splits[0][0]
+    piece = boeck.get_piece(key)
+    wave, onsets, sr = piece.get_data()
+    onsets = piece.get_onsets_seconds()
+
+    n_fft = 2048
+    hop_length = 220.5
+    fps = sr / hop_length
+
+    # stft_frames = librosa.stft(wave, n_fft=n_fft, hop_length=hop_length, center=False)
+    stft_frames = stft(wave, n_fft=n_fft, hop_length=hop_length)
+    sf, _, _ = super_flux_odf(stft_frames, sr)
+    onset_frames = np.multiply(onsets, fps)
+    utils.plot_odf(sf, title="SuperFlux(Ground-truth)", onsets=onset_frames)
+    _, detections = superflux_detections(key, delta=delta)
+    detections_frames = np.multiply(detections, fps)
+    utils.plot_odf(sf, title="SuperFlux(Detections)", onsets=detections_frames)
+
+
+def test_stft():
+    sr = 44100
+    hop = 220
+    n_fft = 2048
+    wave, _ = librosa.load("./demo_audio/original.wav", sr=sr)
+    stft_frames = stft(wave, n_fft=n_fft, hop_length=hop, include_dc=True)
+    print(stft_frames.shape)
+    librosa_stft = librosa.stft(wave, n_fft=n_fft, hop_length=hop, center=True)
+    print(librosa_stft.shape)
+    from matplotlib import pyplot as plt
+    mid_point = stft_frames.shape[1] // 2
+    plt.figure()
+    plt.plot(stft_frames[:200, mid_point])
+    plt.show()
+    plt.figure()
+    plt.plot(librosa_stft[:200, mid_point])
+    plt.show()
+    print(np.allclose(stft_frames, librosa_stft))
 
 
 if __name__ == '__main__':
-    test_cd()
+    # test_stft()
+    # test_superflux_detections(delta=0.2)
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        for delta in [0.1, 0.15, 0.2, 0.3, 0.4, 0.6]:
+            future = executor.submit(test_superflux_f_score, delta=delta)
