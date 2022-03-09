@@ -871,12 +871,32 @@ def test_cp(filename, height):
 def train_adam():
     features = ['rcd', 'superflux']
     global TARGET_MODE
-    TARGET_MODE = 'single'
+    global TARGET_DELTA
+    TARGET_MODE = 'linear'
 
     trainer = ModelManager(datasets.BockSet(), ModelConfig(features=['superflux']), TrainingConfig())
     task = TrainingTask(trainer)
-    task.train_and_test_8_fold()
+    # task.train_and_test_8_fold()
 
+    TARGET_DELTA = 2
+    task.train_and_test_model(initialize=True, save_model=True,
+                              save_checkpoint="cp-spf-2.pt", filename="Report-spf-2.txt")
+
+    TARGET_DELTA = 3
+    task.train_and_test_model(initialize=True, save_model=True,
+                              save_checkpoint="cp-spf-3.pt", filename="Report-spf-3.txt")
+
+    TARGET_DELTA = 4
+    task.train_and_test_model(initialize=True, save_model=True,
+                              save_checkpoint="cp-spf-4.pt", filename="Report-spf-4.txt")
+
+    TARGET_DELTA = 5
+    task.train_and_test_model(initialize=True, save_model=True,
+                              save_checkpoint="cp-spf-5.pt", filename="Report-spf-5.txt")
+
+    TARGET_DELTA = 6
+    task.train_and_test_model(initialize=True, save_model=True,
+                              save_checkpoint="cp-spf-6.pt", filename="Report-spf-6.txt")
     # trainer = ModelManager(datasets.BockSet(), ModelConfig(features=['superflux']), TrainingConfig())
     # task = TrainingTask(trainer)
     # task.train_and_test_model(initialize=False, save_model=True,
