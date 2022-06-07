@@ -1,6 +1,9 @@
 import numpy as np
 import math
 
+import scipy.ndimage
+import scipy.signal
+
 
 def combine_onsets(onsets, time_interval, key=None):
     r"""
@@ -76,7 +79,7 @@ def onset_list_to_target(onsets, sample_per_frame, length, delta, mode='linear',
     # falling includes 1
     falling = np.linspace(1, 0, fill_len, endpoint=False)
 
-    target = np.zeros(length, dtype=np.float)
+    target = np.zeros(length, dtype='float32')
     for onset in onsets:
         frame = int(math.floor(float(onset) / sample_per_frame))
         # IndexError: out of bounds
@@ -101,6 +104,40 @@ def onset_list_to_target(onsets, sample_per_frame, length, delta, mode='linear',
             # applying maximum to avoid overwriting close onsets
             target[frame: frame + d] = np.maximum(falling[:d], target[frame: frame + d])
     return target
+
+
+def peak_pick_dynamic(signal, lambda_=1.0, min_threshold=0.1, max_threshold=0.5, smooth_window=7):
+    r"""
+    Find peaks in the signal according to the paper
+    Eyben "Universal onset detection with bidirectional long short-term memory neural networks" ISMIR 2010
+
+    -----
+    :param signal: input signal
+    :param lambda_: lambda parameter
+    :param min_threshold: minimum threshold
+    :param max_threshold: maximum threshold
+    :return: list of peaks
+    """
+    signal = np.array(signal)
+    # smooth the signal using hamming window
+    if smooth_window and smooth_window > 1:
+        signal = np.convolve(signal, np.hamming(smooth_window), mode='same')
+    threshold = np.median(signal)
+    threshold = lambda_ * max(min_threshold, min(max_threshold, threshold))
+    signal = signal * (signal > threshold)
+    local_maxima = scipy.signal.argrelextrema(signal, np.greater)
+    return local_maxima
+
+
+def peak_pick_static(signal, lambda_=0.35, smooth_window=5):
+    signal = np.array(signal)
+    # smooth the signal using hamming window
+    if smooth_window and smooth_window > 1:
+        signal = np.convolve(signal, np.hamming(smooth_window), mode='same')
+    threshold = lambda_
+    signal = signal * (signal > threshold)
+    local_maxima = scipy.signal.argrelextrema(signal, np.greater)
+    return local_maxima
 
 
 def test():

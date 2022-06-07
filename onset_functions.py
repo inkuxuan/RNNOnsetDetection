@@ -11,7 +11,7 @@ import utils
 from boeck.onset_evaluation import Counter
 
 
-def complex_domain_odf(stft, aggregate=np.mean, rectify=True):
+def complex_domain_odf(stft, aggregate=np.mean, rectify=True, log=True):
     r"""
     Calculate onset and offset strength array from the stft frames
 
@@ -19,6 +19,7 @@ def complex_domain_odf(stft, aggregate=np.mean, rectify=True):
     :param rectify: apply rectification that only preserve rising magnitude
     :param stft: stft frames, must having complex values in each element
     :param aggregate: aggregate function, default mean()
+    :param log: True to apply logarithm to the result
     :return: (onset_strength, offset_strength)
     """
     phase = np.arctan2(np.imag(stft), np.real(stft))
@@ -37,8 +38,12 @@ def complex_domain_odf(stft, aggregate=np.mean, rectify=True):
     # rectify so that only onsets remain
     if rectify:
         cd_result[:, 1:] = cd_result[:, 1:] * (magnitude[:, 1:] > magnitude[:, :-1])
-    # take norm and aggregate
-    return aggregate(np.abs(cd_result), axis=0)
+    # take norm
+    cd_result = np.abs(cd_result)
+    # take log
+    if log:
+        cd_result = np.log10(cd_result + 1)
+    return aggregate(cd_result, axis=0)
 
 
 # noinspection DuplicatedCode
@@ -148,13 +153,14 @@ def _tonal_filter_bank(
     return filterbank
 
 
-def tonal_spectrogram(stft, filter_bank=None, power_spectrum=False):
+def tonal_spectrogram(stft, filter_bank=None, power_spectrum=False, log=False):
     r"""
     Calculate spectrogram based on a given filterbank
     :param stft: stft frames
     :param filter_bank: filterbank used to do the dot product
     :param power_spectrum: if set to True, a power spectrogram (stft**2) is used instead before applying filter bank
         , and finally taken decibel scale.
+    :param log: if set to True, the spectrogram is taken logarithmically
     :return: the spectrogram in 2d-array
     """
     spectrogram = abs(stft)
@@ -165,6 +171,8 @@ def tonal_spectrogram(stft, filter_bank=None, power_spectrum=False):
         spectrogram = np.dot(filter_bank, spectrogram)
     if power_spectrum:
         spectrogram = librosa.core.power_to_db(spectrogram)
+    if log:
+        spectrogram = np.log10(spectrogram + 1)
     return spectrogram
 
 
@@ -179,6 +187,7 @@ def super_flux_odf(
         normalized_filters=False,
         max_size=3,
         power_spectrum=False,
+        log=True,
         keep_dims=True,
         aggregate=np.mean
 ):
@@ -207,6 +216,7 @@ def super_flux_odf(
     :param max_size: the size of the maximum filter
     :param power_spectrum: if set to True, the stft frame is powered first,
         and the spectrogram is taken decibel rather than magnitude
+    :param log: if set to True, the spectrogram is taken logarithmically
     :param keep_dims: if set to True, the returned odf keeps the same length (in time) as the input stft
     :param aggregate: the aggregation function to be applied to the final difference
     :return: (onset_strength, filter_bank, tonal_spectrogram), onset strength function in a 1d-array
@@ -220,7 +230,7 @@ def super_flux_odf(
             f_min=f_min,
             f_max=f_max,
             normalized_filters=normalized_filters)
-    spectrogram = tonal_spectrogram(stft, filter_bank=filter_bank, power_spectrum=power_spectrum)
+    spectrogram = tonal_spectrogram(stft, filter_bank=filter_bank, power_spectrum=power_spectrum, log=log)
 
     # apply maximum filter on the reference spectrogram
     if max_size > 1:
@@ -234,6 +244,7 @@ def super_flux_odf(
     # calculate the difference between the reference spectrogram and the original spectrogram
     if keep_dims:
         diff = np.zeros_like(spectrogram)
+        # the first frame has to be zero in order to keep the same dimensions as the input spectrogram
         diff[:, lag:] = spectrogram[:, lag:] - ref_spectrogram[:, :-lag]
     else:
         diff = spectrogram[:, lag:] - ref_spectrogram[:, :-lag]
@@ -386,29 +397,30 @@ def test_superflux_f_score(n_fft=2048, hop_length=220.5, lag=2,
     keys = splits[0] + splits[1] + splits[2] + splits[3] + splits[4] + splits[5] + splits[6] + splits[7]
     count = Counter()
     for key in keys:
-        onsets, detections = superflux_detections(key, n_fft=n_fft, hop_length=hop_length, lag=lag,
-                                                  pre_max=pre_max, post_max=post_max,
-                                                  pre_avg=pre_avg, post_avg=post_avg, delta=delta,
-                                                  combine_width=combine_width, offset=offset)
+        onsets, detections = superflux_detections_by_key(key, n_fft=n_fft, hop_length=hop_length, lag=lag,
+                                                         pre_max=pre_max, post_max=post_max,
+                                                         pre_avg=pre_avg, post_avg=post_avg, delta=delta,
+                                                         combine_width=combine_width, offset=offset)
         # merge close onsets
         onsets = boeck.onset_evaluation.combine_events(onsets, combine_width)
         # calculate f-score
         count += boeck.onset_evaluation.count_errors(detections, onsets, eval_window)
     print(f"delta: {delta}. f-score: {count.fmeasure}")
+    print(f"\tTP: {count.tp}, FP:{count.fp}, FN:{count.fn}")
 
 
-def superflux_detections(key, n_fft=2048, hop_length=220.5, lag=2,
-                         pre_max=0.03, post_max=0.03,
-                         pre_avg=0.1, post_avg=0.07, delta=0.1,
-                         combine_width=0.03, offset=0.):
+def superflux_detections_by_key(key, n_fft=2048, hop_length=220.5, lag=2,
+                                pre_max=0.03, post_max=0.03,
+                                pre_avg=0.1, post_avg=0.07, delta=.1,
+                                combine_width=0.03, offset=0.):
     boeck_set = datasets.BockSet()
     track = boeck_set.get_piece(key)
     wave = track.get_wave()
-    wave = utils.normalize_wav(wave, 'float')
+    # wave = utils.normalize_wav(wave, 'float')
     ground_truth = track.get_onsets_seconds()
     sr = track.get_sr()
     stft_f = stft(wave, n_fft=n_fft, hop_length=hop_length)
-    sf, _, _ = super_flux_odf(stft_f, sr, lag=lag)
+    sf, _, _ = super_flux_odf(stft_f, sr, lag=lag, aggregate=np.mean)
     # peak-picking
     detections = sf_peak_picking(sf, sr, hop_length, pre_max=pre_max, post_max=post_max, pre_avg=pre_avg,
                                  post_avg=post_avg, delta=delta, combine_width=combine_width)
@@ -417,7 +429,7 @@ def superflux_detections(key, n_fft=2048, hop_length=220.5, lag=2,
     return ground_truth, detections
 
 
-def stft(wave, n_fft=2048, hop_length=220.5, online=False, include_dc=False):
+def stft(wave, n_fft=2048, hop_length=220.5, online=False, include_dc=False, use_incorrect_bins=False):
     r"""
     This is implemented to ensure the same performance as
 
@@ -433,15 +445,17 @@ def stft(wave, n_fft=2048, hop_length=220.5, online=False, include_dc=False):
     :param hop_length: the hop size, can be a float in order to match an integer fps
     :param online: online mode (but see comments for explanations on why this is NOT online)
     :param include_dc: whether to include the DC component in the STFT (to include frequency bin #0)
+    :param use_incorrect_bins: See comments on `stft_frames[:, frame] = fft.rfft(signal)[1:]`
     :return: the STFT frames with shape (frequency_bin, frame)
     """
     import scipy.fft as fft
     n_samples = len(wave)
     n_frames = int(np.ceil(len(wave) / hop_length))
     # NOTE that here n_fft_bins is not `n_fft // 2 + 1`
-    # because only this many bins are used in the referred paper
+    # because only this many bins are used in the referred paper (i.e. not include the DC bin)
     # However see below the `FFT` part for a difference in the implementation
     n_fft_bins = int(n_fft / 2)
+    # If include DC bin
     if include_dc:
         n_fft_bins += 1
     window = np.hanning(n_fft)
@@ -489,13 +503,16 @@ def stft(wave, n_fft=2048, hop_length=220.5, online=False, include_dc=False):
         else:
             # NOTE that here the referred paper used `fft.fft(signal)[:n_fft_bins]` which includes the DC bin
             # which is not correct
-            # Here we use the 1-D FFT for Real input and discard the DC bin
+            # Here we use the RFFT and discard the DC bin
             # [1:n_fft_bins+1]
-            stft_frames[:, frame] = fft.rfft(signal)[1:]
+            if not use_incorrect_bins:
+                stft_frames[:, frame] = fft.rfft(signal)[1:]
+            else:
+                stft_frames[:, frame] = fft.fft(signal)[:n_fft_bins]
     return stft_frames
 
 
-def test_superflux_detections(delta=0.1):
+def test_superflux_detections(delta=0.006):
     boeck = datasets.BockSet()
     splits = boeck.splits
     key = splits[0][0]
@@ -504,15 +521,15 @@ def test_superflux_detections(delta=0.1):
     onsets = piece.get_onsets_seconds()
 
     n_fft = 2048
-    hop_length = 220.5
+    hop_length = 441
     fps = sr / hop_length
 
     # stft_frames = librosa.stft(wave, n_fft=n_fft, hop_length=hop_length, center=False)
     stft_frames = stft(wave, n_fft=n_fft, hop_length=hop_length)
-    sf, _, _ = super_flux_odf(stft_frames, sr)
+    sf, _, _ = super_flux_odf(stft_frames, sr, aggregate=np.mean)
     onset_frames = np.multiply(onsets, fps)
     utils.plot_odf(sf, title="SuperFlux(Ground-truth)", onsets=onset_frames)
-    _, detections = superflux_detections(key, delta=delta)
+    _, detections = superflux_detections_by_key(key, delta=delta)
     detections_frames = np.multiply(detections, fps)
     utils.plot_odf(sf, title="SuperFlux(Detections)", onsets=detections_frames)
 
@@ -537,9 +554,45 @@ def test_stft():
     print(np.allclose(stft_frames, librosa_stft))
 
 
+def get_example_superflux_output():
+    boeck = datasets.BockSet()
+    splits = boeck.splits
+    key = splits[0][0]
+    piece = boeck.get_piece(key)
+    wave, onsets, sr = piece.get_data()
+
+    n_fft = 2048
+    hop_length = 220.5
+    stft_frames = stft(wave, n_fft=n_fft, hop_length=hop_length)
+    sf, _, _ = super_flux_odf(stft_frames, sr)
+    return sf
+
+
+def plot_example_superflux():
+    sf = get_example_superflux_output()
+    utils.plot_odf(sf)
+
+
+def test_save_superflux_output():
+    sf = get_example_superflux_output()
+    np.save("./superflux_array", sf)
+    print("test file saved")
+
+
+def test_load_superflux_output():
+    sf_computed = get_example_superflux_output()
+    sf_loaded = np.load("./superflux_array.npy")
+    print(f"allclose: {np.allclose(sf_computed, sf_loaded)}")
+    print(f"equal: {np.equal(sf_computed, sf_loaded)}")
+    print("test end")
+
+
 if __name__ == '__main__':
     # test_stft()
     # test_superflux_detections(delta=0.2)
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        for delta in [0.1, 0.15, 0.2, 0.3, 0.4, 0.6]:
-            future = executor.submit(test_superflux_f_score, delta=delta)
+    # test_load_superflux_output()
+    test_superflux_f_score(delta=0.006, hop_length=441, lag=1)
+    # plot_example_superflux()
+    # with ThreadPoolExecutor(max_workers=6) as executor:
+    #     for delta in np.arange(0.002, 0.022, 0.002):
+    #         future = executor.submit(test_superflux_f_score, delta=delta, hop_length=441, lag=1)

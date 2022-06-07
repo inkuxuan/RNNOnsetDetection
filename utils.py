@@ -77,15 +77,21 @@ def normalize_wav(wav, type='float32'):
     wav = wav.astype(type)
     return wav
 
+
 class EarlyStopping(object):
-    def __init__(self, patience=20, min_improvement=0.):
+    def __init__(self, patience=20, min_improvement=0., min_epoch=1000):
         self.min_improvement = min_improvement
         self.patience = patience
         self.counter = 0
         self.best_loss = None
         self.early_stop = False
+        self.min_epoch = min_epoch
+        self.epoch = 0
 
     def __call__(self, loss):
+        self.epoch += 1
+        if self.epoch < self.min_epoch:
+            return
         if self.best_loss is None:
             self.best_loss = loss
         elif self.best_loss - loss > self.min_improvement:

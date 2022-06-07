@@ -5,6 +5,7 @@ import torch
 from torch import nn
 from torch.backends import cudnn
 
+FORCE_CPU = False
 
 # If the following conditions are satisfied: 1) cudnn is enabled, 2) input data is on the GPU 3) input data has dtype
 # torch.float16 4) V100 GPU is used, 5) input data is not in PackedSequence format
@@ -22,10 +23,8 @@ def get_device():
 
 
 device = get_device()
-
-
-# device = torch.device('cpu')
-
+if FORCE_CPU:
+    device = torch.device('cpu')
 
 def init_parameters(m):
     if type(m) in [nn.Linear]:

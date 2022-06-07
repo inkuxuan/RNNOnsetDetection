@@ -163,6 +163,19 @@ class BockSet(object):
         """
         return self.splits[index]
 
+    def generate_splits(self, test_split_index):
+        r"""
+        :return: (training_set_keys, validation_set_keys, test_set_keys)
+        """
+        splits = self.splits.copy()
+        # setup training set, validation set, test set
+        test_set_keys = splits.pop(test_split_index)
+        # set the next one as validation set
+        validation_set_keys = splits.pop(test_split_index % len(splits))
+        # flatten the training set
+        training_set_keys = np.concatenate(splits)
+        return training_set_keys, validation_set_keys, test_set_keys
+
     class Piece(object):
         onsets = []
         onset_in_seconds = []
@@ -257,6 +270,27 @@ def test_BockSet():
             pass
 
 
+def count_boeck_split_info():
+    import datetime
+    boeck_set = BockSet()
+    train, valid, test = boeck_set.generate_splits(0)
+    splits = {"training": train, "validation": valid, "test": test}
+    # count time, onsets of each split
+    for split_name, split in splits.items():
+        total_time = 0.
+        total_onsets = 0
+        for key in split:
+            piece = boeck_set.get_piece(key)
+            onsets = piece.get_onsets_seconds()
+            length = len(piece.get_wave()) / piece.get_sr()
+            total_onsets += len(onsets)
+            total_time += length
+        print(f"Split info of {split_name}:")
+        print(f"\tTotal time: {str(datetime.timedelta(seconds=total_time))}")
+        print(f"\tTotal onset annotations: {total_onsets}")
+
 
 if __name__ == '__main__':
-    test_BockSet()
+    # test_BockSet()
+    count_boeck_split_info()
+
