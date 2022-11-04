@@ -81,6 +81,7 @@ def init_args(argv):
 
     parser.add_argument_group('Global settings')
     parser.add_argument("--cpu-only", action="store_true")
+    parser.add_argument("--threads", type=int)
 
     parser.add_argument_group('Preprocessing settings')
     parser.add_argument("--no-cached-preprocessing", dest="cached_preprocessing", action="store_false",
@@ -954,6 +955,11 @@ class ModelEvaluator:
 
 def main(argv):
     args = init_args(argv)
+    print(f"Detected CPU Cores: {CPU_CORES}")
+    if args.threads:
+        print(f"Overriding thread numbers: {args.threads}")
+        global CPU_CORES
+        CPU_CORES = args.threads
     print("Loading Dataset")
     boeck_set = datasets.BockSet(args.sampling_rate)
     if args.cpu_only:
