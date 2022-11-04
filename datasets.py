@@ -8,9 +8,9 @@ from intervaltree import Interval, IntervalTree
 
 import utils
 
-MUSIC_NET_PATH = r"..\Datasets\MusicNet\musicnet.npz"
-MODAL_PATH = r"..\Datasets\modal\onsets1.1.hdf5"
-BOCK_SET_PATH = r"..\Datasets\Boeck/"
+MUSIC_NET_PATH = r"../Datasets/MusicNet/musicnet.npz"
+MODAL_PATH = r"../Datasets/modal/onsets1.1.hdf5"
+BOCK_SET_PATH = r"../Datasets/Boeck/"
 
 
 class MusicNet(object):
