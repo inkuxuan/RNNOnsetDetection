@@ -969,7 +969,8 @@ def main(argv):
         model.load_cp(args.load_model_file)
     else:
         print("Training model")
-        model.train_only()
+        info = model.train_only()
+        save_training_report(info, args)
     if args.save_model_file:
         print(f"Saving weights and args to {args.save_model_file}")
         model.save_cp(args.save_model_file)
