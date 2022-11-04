@@ -955,10 +955,10 @@ class ModelEvaluator:
 
 def main(argv):
     args = init_args(argv)
+    global CPU_CORES
     print(f"Detected CPU Cores: {CPU_CORES}")
     if args.threads:
         print(f"Overriding thread numbers: {args.threads}")
-        global CPU_CORES
         CPU_CORES = args.threads
     print("Loading Dataset")
     boeck_set = datasets.BockSet(args.sampling_rate)
