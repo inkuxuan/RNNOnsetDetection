@@ -995,7 +995,7 @@ def evalutate_8f_saved(model_file_template, features, lambdas, filename="Report.
 
 
 if __name__ == '__main__':
-    main(sys.argv)
+    main(None)
     # evaluate_saved(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220402 085854 100fps\spf-d0.pt"
     #                , ['superflux'], None,
     #                filename="Report-spf-static-d0.txt")
