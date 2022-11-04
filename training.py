@@ -957,11 +957,11 @@ def main(argv):
     print("Loading Dataset")
     boeck_set = datasets.BockSet(args.sampling_rate)
     if args.cpu_only:
-        print("using CPU only")
+        print("[WARNING] using CPU only")
         networks.device = torch.device('cpu')
     preprocessor = Preprocessor(boeck_set, args)
     # load or train a model
-    print("Creating model")
+    print(f"Creating model on device: {networks.device}")
     model = ModelManager(boeck_set, preprocessor, args)
     if args.load_model_file:
         print("Loading weights from file")
