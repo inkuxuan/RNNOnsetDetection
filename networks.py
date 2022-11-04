@@ -26,11 +26,6 @@ device = get_device()
 if FORCE_CPU:
     device = torch.device('cpu')
 
-def init_parameters(m):
-    if type(m) in [nn.Linear]:
-        torch.nn.init.normal_(m.weight, mean=0.0, std=0.1)
-        m.bias.data.fill_(0.0)
-
 
 class SingleOutRNN(nn.Module):
     r"""

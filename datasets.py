@@ -121,8 +121,9 @@ class BockSet(object):
     AUDIO_EXTENSION = ".flac"
     ONSETS_EXTENSION = ".onsets"
 
-    def __init__(self):
+    def __init__(self, sr=None):
         self.keys = []
+        self.sr = sr
         for filename in os.listdir(BockSet.AUDIO_PATH):
             if filename.endswith(".flac"):
                 self.keys.append(os.path.splitext(filename)[0])
@@ -143,7 +144,7 @@ class BockSet(object):
 
     def get_piece(self, key):
         # TODO cache object?
-        return BockSet.Piece(key)
+        return BockSet.Piece(key, sr=self.sr)
 
     def get_splits(self):
         r"""
@@ -182,15 +183,16 @@ class BockSet(object):
         wave = []
         sr = 0
 
-        def __init__(self, key):
+        def __init__(self, key, sr=None):
             self.key = key
+            self.sr = sr
             # audio must be loaded first (onset conversion relies on sampling rate)
             self._load_audio()
             self._load_onsets()
 
+        # audio
         def _load_audio(self):
-            # audio
-            self.wave, self.sr = librosa.load(BockSet.AUDIO_PATH + self.key + BockSet.AUDIO_EXTENSION, sr=None)
+            self.wave = []
 
         def _load_onsets(self):
             self.onsets_in_seconds = []
@@ -202,6 +204,7 @@ class BockSet(object):
             self.onsets = np.multiply(self.onsets_in_seconds, self.sr).astype(int)
 
         def get_wave(self):
+            self.wave, _ = librosa.load(BockSet.AUDIO_PATH + self.key + BockSet.AUDIO_EXTENSION, sr=self.sr)
             return self.wave
 
         def seconds2samples(self, seconds) -> int:
@@ -293,4 +296,3 @@ def count_boeck_split_info():
 if __name__ == '__main__':
     # test_BockSet()
     count_boeck_split_info()
-

@@ -30,7 +30,7 @@ def combine_onsets(onsets, time_interval, key=None):
     return onsets
 
 
-def combine_onsets_avg(onsets, time_interval, key=None):
+def combine_onsets_avg(onsets, time_interval):
     r"""
     Merge onsets that are close to each other replacing with arithmetic mean.
 
@@ -40,10 +40,8 @@ def combine_onsets_avg(onsets, time_interval, key=None):
     :param time_interval: threshold (inclusive) within which onsets are merged
     :return: list of merged onsets
     """
-    if len(onsets) < 1:
-        if key:
-            print(f"[WARNING] Empty onset list! key={key}")
-        return []
+    if time_interval == 0:
+        return onsets
     onsets_original = onsets.copy()
     onsets_original.sort()
     # the final output(combined), initialize with the first onset
@@ -58,7 +56,7 @@ def combine_onsets_avg(onsets, time_interval, key=None):
     return onsets
 
 
-def onset_list_to_target(onsets, sample_per_frame, length, delta, mode='linear', key=None):
+def onset_list_to_target(onsets, sample_per_frame, length, delta, mode='linear'):
     r"""
     Convert an onset list to a target list for training
 
@@ -129,12 +127,13 @@ def peak_pick_dynamic(signal, lambda_=1.0, min_threshold=0.1, max_threshold=0.5,
     return local_maxima
 
 
-def peak_pick_static(signal, lambda_=0.35, smooth_window=5):
+def peak_pick_static(signal, threshold=0.35, smooth_window=5):
+    """returns (peak_index, peak_height)"""
     signal = np.array(signal)
     # smooth the signal using hamming window
     if smooth_window and smooth_window > 1:
         signal = np.convolve(signal, np.hamming(smooth_window), mode='same')
-    threshold = lambda_
+    threshold = threshold
     signal = signal * (signal > threshold)
     local_maxima = scipy.signal.argrelextrema(signal, np.greater)
     return local_maxima

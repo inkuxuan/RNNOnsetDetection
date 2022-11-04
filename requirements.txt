@@ -1,5 +1,5 @@
 future==0.18.2
-h5py==3.3.0
+h5py
 idna==3.2
 intervaltree==3.1.0
 ipython==7.26.0
@@ -15,6 +15,6 @@ mir-eval==0.6
 numpy==1.20.3
 scikit-learn==0.24.2
 scipy==1.7.1
-torch==1.9.0+cu111
-torchaudio==0.9.0
-torchvision==0.10.0+cu111
+torch
+torchaudio
+torchvision
