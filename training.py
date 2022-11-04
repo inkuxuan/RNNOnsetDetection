@@ -95,8 +95,8 @@ def init_args(argv):
     parser.add_argument("--n-fft", type=int, default=2048)
     parser.add_argument("--hop-length", type=float, default=441)
     parser.add_argument("--superflux-lag", type=int, default=1)
-    parser.add_argument("--no-normalize-wave", dest="normalize-wave", action="store_false")
-    parser.add_argument("--no-normalize-odf", dest="normalize-odf", action="store_false")
+    parser.add_argument("--no-normalize-wave", dest="normalize_wave", action="store_false")
+    parser.add_argument("--no-normalize-odf", dest="normalize_odf", action="store_false")
 
     # args for training
     parser.add_argument_group('Training')
@@ -179,8 +179,7 @@ class Preprocessor:
         self.superflux_log = args.superflux_log
         self.superflux_lag = args.superflux_lag
         self.normalize_wave = args.normalize_wave
-        self.normalize_odf = args.normalize_odf
-        self.normalize_odf = args.normalize_odf
+        self.arg_normalize_odf = args.normalize_odf
         self.onset_delta = args.onset_merge_interval
         self.cached = args.cached_preprocessing
         self.target_delta = args.targeting_delta_frames
@@ -226,7 +225,7 @@ class Preprocessor:
             odfs = self.get_features(wave)
             # arrange dimensions so that the model can accept (shape==[seq_len, n_feature])
             odfs = odfs.T
-            if self.normalize_odf:
+            if self.arg_normalize_odf:
                 # Normalize the odfs along each feature so that they range from 0 to 1
                 odfs = self.normalize_odf(odfs)
             if self.cached:
@@ -339,7 +338,7 @@ class ModelManager(object):
                 bidirectional=args.bidirectional,
                 sigmoid=False
             ).to(networks.device)
-        self.loss_fn = nn.BCEWithLogitsLoss(weight=args.weight)
+        self.loss_fn = nn.BCEWithLogitsLoss(weight=torch.tensor(args.weight, device=networks.device))
         optimizer_name = args.optimizer
         lr = args.lr
         self.early_stop_patience = args.early_stop_patience
