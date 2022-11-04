@@ -108,7 +108,7 @@ def init_args(argv):
     parser.add_argument("--nonlinearity", type=str, default='tanh')
     parser.add_argument("--bidirectional", type=bool, default=True)
     parser.add_argument("--weight", type=float, default=1)
-    parser.add_argument("--optimizer", type=str, default='adam', choice=['adam', 'sgd'])
+    parser.add_argument("--optimizer", type=str, default='adam', choices=['adam', 'sgd'])
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--early-stop-patience", type=int, default=50)
     parser.add_argument("--early-stop-min-epochs", type=int, default=1000)
@@ -955,17 +955,23 @@ class ModelEvaluator:
 
 def main(argv):
     args = init_args(argv)
+    print("Loading Dataset")
     boeck_set = datasets.BockSet(args.sampling_rate)
     if args.cpu_only:
+        print("using CPU only")
         networks.device = torch.device('cpu')
     preprocessor = Preprocessor(boeck_set, args)
     # load or train a model
+    print("Creating model")
     model = ModelManager(boeck_set, preprocessor, args)
     if args.load_model_file:
+        print("Loading weights from file")
         model.load_cp(args.load_model_file)
     else:
+        print("Training model")
         model.train_only()
     if args.save_model_file:
+        print(f"Saving weights and args to {args.save_model_file}")
         model.save_cp(args.save_model_file)
         save_args(args.save_model_file + ".args", args)
 
@@ -975,8 +981,10 @@ def main(argv):
 
     evaluator = ModelEvaluator(boeck_set, peak_picker, args)
     if args.speed_test:
+        print("Performing Speed Test")
         evaluator.speed_test(model)
     if args.evaluate:
+        print("Evaluating model")
         evaluator.evaluate_model(model)
 
 
