@@ -892,7 +892,7 @@ class ModelEvaluator:
         pass
 
     def _write_evaluation_results(self, dict_threshold_count, filename):
-        pathlib.Path(RUN_DIR + filename).mkdir(parents=True, exist_ok=True)
+        pathlib.Path(RUN_DIR).mkdir(parents=True, exist_ok=True)
         with open(RUN_DIR + filename, 'w') as file:
             file.write("\n[Evaluation Report]\n")
             file.write("\n[Command Line Arguments]\n")
