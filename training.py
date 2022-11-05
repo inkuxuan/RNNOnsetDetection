@@ -327,18 +327,17 @@ class ModelManager(object):
         self.hop_length = args.hop_length
         self.preprocessor = preprocessor
         self.test_split_index = args.test_set_index
+        self.model = networks.SingleOutRNN(
+            len(args.features),
+            args.num_layer_units,
+            args.num_layers,
+            nonlinearity=args.nonlinearity,
+            bidirectional=args.bidirectional,
+            sigmoid=False
+        ).to(networks.device)
         if args.load_model_file:
             self.load_model_file = args.load_model_file
             self.load_cp(args.load_model_file)
-        else:
-            self.model = networks.SingleOutRNN(
-                len(args.features),
-                args.num_layer_units,
-                args.num_layers,
-                nonlinearity=args.nonlinearity,
-                bidirectional=args.bidirectional,
-                sigmoid=False
-            ).to(networks.device)
         self.loss_fn = nn.BCEWithLogitsLoss(weight=torch.tensor(args.weight, device=networks.device))
         optimizer_name = args.optimizer
         lr = args.lr
