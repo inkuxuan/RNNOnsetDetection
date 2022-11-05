@@ -128,7 +128,7 @@ def peak_pick_dynamic(signal, lambda_=1.0, min_threshold=0.1, max_threshold=0.5,
 
 
 def peak_pick_static(signal, threshold=0.35, smooth_window=5):
-    """returns (peak_index, peak_height)"""
+    """returns (peak_index, )"""
     signal = np.array(signal)
     # smooth the signal using hamming window
     if smooth_window and smooth_window > 1:

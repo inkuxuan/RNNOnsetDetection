@@ -596,7 +596,7 @@ class PeakPicker:
     def peak_pick(self, signal, threshold_override=None):
         """returns peaks in seconds"""
         threshold = threshold_override if threshold_override else self.threshold
-        (peaks, heights) = onset_utils.peak_pick_static(signal, threshold, smooth_window=self.smooth_window_frames)
+        (peaks, ) = onset_utils.peak_pick_static(signal, threshold, smooth_window=self.smooth_window_frames)
         peaks = np.array(peaks) / self.fps
         return peaks
 
