@@ -403,11 +403,11 @@ class ModelManager(object):
 
     def load_cp(self, filename):
         checkpoint = torch.load(filename)
-        if hasattr(self, 'model'):
+        if hasattr(self, 'model') and self.model:
             self.model.load_state_dict(checkpoint['model'])
-        if hasattr(self, 'optimizer'):
+        if hasattr(self, 'optimizer') and self.optimizer:
             self.optimizer.load_state_dict(checkpoint['optimizer'])
-        if hasattr(self, 'scheduler'):
+        if hasattr(self, 'scheduler') and self.scheduler:
             self.scheduler.load_state_dict(checkpoint['scheduler'])
 
     def predict(self,
