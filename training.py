@@ -922,7 +922,7 @@ class ModelEvaluator:
         return count
 
     def _test_on_key(self, model, key, threshold):
-        ground_truth = self.boeck_set.get_piece(key).get_onset_seconds()
+        ground_truth = self.boeck_set.get_piece(key).get_onsets_seconds()
         signal = model.predict(key=key)
         detections = self.peak_picker.peak_pick(signal, threshold_override=threshold)
         if COMBINE_ONSETS:
