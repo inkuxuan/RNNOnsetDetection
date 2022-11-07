@@ -10,6 +10,6 @@ Python version `3.10` is used for this project
 
 ### Frequently used parameters
 
-`--save-model-file test_environment --evaluate --feature superflux --feature rcd --cpu-only`
+`--save-model-file <filename> --evaluate --feature superflux rcd --cpu-only`
 
-`--load-model-file <filename> --evaluate --feature superflus --feature rcd --cpu-only`
+`--load-model-file <filename> --evaluate --feature superflus rcd --cpu-only`

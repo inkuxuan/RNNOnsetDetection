@@ -883,11 +883,12 @@ class ModelEvaluator:
         for threshold in thresholds:
             dict_threshold_count[threshold] = self._test_on_keys(model, test_set_keys, threshold, concurrent_test)
         # save report file
-        report_filename = os.path.basename(self.args.load_model_file)
+        report_filename = self.args.load_model_file
         if report_filename is None:
             report_filename = self.args.save_model_file
         if report_filename is None:
             report_filename = get_datetime_str() + "_eval_report"
+        report_filename = os.path.basename(report_filename)
         report_filename += ".eval.txt"
         self._write_evaluation_results(dict_threshold_count, report_filename)
         pass
