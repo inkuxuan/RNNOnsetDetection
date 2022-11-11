@@ -1,5 +1,5 @@
 # RNN Onset Detector
-Python version `3.10` is used for this project
+Python version `3.9` is used for this project
 
 ## Deployment
 * Prepare the Boeck dataset in `../Datasets/Boeck/`
