@@ -121,7 +121,7 @@ class BockSet(object):
     AUDIO_EXTENSION = ".flac"
     ONSETS_EXTENSION = ".onsets"
 
-    def __init__(self, sr=None):
+    def __init__(self, sr=44100):
         self.keys = []
         self.sr = sr
         for filename in os.listdir(BockSet.AUDIO_PATH):

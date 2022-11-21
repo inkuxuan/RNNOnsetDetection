@@ -20,7 +20,7 @@ def complex_domain_odf(stft, aggregate=np.mean, rectify=True, log=True):
     :param stft: stft frames, must having complex values in each element
     :param aggregate: aggregate function, default mean()
     :param log: True to apply logarithm to the result
-    :return: (onset_strength, offset_strength)
+    :return: onset_strength
     """
     phase = np.arctan2(np.imag(stft), np.real(stft))
     magnitude = np.abs(stft)
@@ -45,6 +45,36 @@ def complex_domain_odf(stft, aggregate=np.mean, rectify=True, log=True):
         cd_result = np.log10(cd_result + 1)
     return aggregate(cd_result, axis=0)
 
+
+def _wrap_to_pi(angle):
+    """
+    Wrap an angle the range [-π,π)
+
+    """
+    return np.mod(angle + np.pi, 2.0 * np.pi) - np.pi
+
+
+def phase_deviation(stft, aggregate=np.mean, weighted=True):
+    r"""
+    (Weighted) Phase Deviation
+
+    ------
+    :param stft: stft frames, must having complex values in each element
+    :param aggregate: aggregate function, default mean()
+    :param weighted: if set to True, outputs Weighted Phase Deviation
+    :return: onset_strength
+    """
+    phase = np.arctan2(np.imag(stft), np.real(stft))
+    magnitude = np.abs(stft)
+    pd = np.zeros_like(phase)
+    # 2nd derivative of Phi (phase)
+    pd[:, 2:] = phase[:, 2:] - 2 * phase[:, 1:-1] + phase[:, :-2]
+    pd = _wrap_to_pi(pd)
+    if weighted:
+        pd = aggregate(np.abs(pd * magnitude), axis=0)
+    else:
+        pd = aggregate(np.abs(pd), axis=0)
+    return pd
 
 # noinspection DuplicatedCode
 def _tone_frequencies(band_per_octave, f_min=27.5, f_max=17000, initial_freq=440):
@@ -568,8 +598,27 @@ def get_example_superflux_output():
     return sf
 
 
+def get_example_wpd_output():
+    boeck = datasets.BockSet()
+    splits = boeck.splits
+    key = splits[0][0]
+    piece = boeck.get_piece(key)
+    wave, onsets, sr = piece.get_data()
+
+    n_fft = 2048
+    hop_length = 220.5
+    stft_frames = stft(wave, n_fft=n_fft, hop_length=hop_length)
+    wpd = phase_deviation(stft_frames)
+    return wpd
+
+
 def plot_example_superflux():
     sf = get_example_superflux_output()
+    utils.plot_odf(sf)
+
+
+def plot_example_wpd():
+    sf = get_example_wpd_output()
     utils.plot_odf(sf)
 
 
@@ -588,10 +637,11 @@ def test_load_superflux_output():
 
 
 if __name__ == '__main__':
+    plot_example_wpd()
     # test_stft()
     # test_superflux_detections(delta=0.2)
     # test_load_superflux_output()
-    test_superflux_f_score(delta=0.006, hop_length=441, lag=1)
+    # test_superflux_f_score(delta=0.006, hop_length=441, lag=1)
     # plot_example_superflux()
     # with ThreadPoolExecutor(max_workers=6) as executor:
     #     for delta in np.arange(0.002, 0.022, 0.002):

@@ -89,7 +89,7 @@ def init_args(argv):
                         help="If cache is enabled, all the odf preprocessing result will be cached in MEMORY,"
                              "so use this if you have less than 8GB of RAM and suffer from crashing")
     parser.add_argument("--feature", dest="features", type=str, nargs="+", required=True,
-                        choices=['superflux', 'rcd'])
+                        choices=['superflux', 'rcd', 'wpd'])
     parser.add_argument("--rcd-log", type=bool, default=True)
     parser.add_argument("--superflux-log", type=bool, default=True)
 
@@ -202,6 +202,9 @@ class Preprocessor:
                 onset_strength, _, _ = onset_functions.super_flux_odf(stft, self.sr,
                                                                       lag=self.superflux_lag,
                                                                       log=self.superflux_log)
+                f.append(onset_strength)
+            elif feature in ['wpd']:
+                onset_strength = onset_functions.phase_deviation(stft)
                 f.append(onset_strength)
         return np.asarray(f)
 
