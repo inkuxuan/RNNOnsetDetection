@@ -1,6 +1,11 @@
 import os
 import random
 import sys
+import wave as wavelib
+
+import librosa
+import mir_eval
+import soundfile
 
 import boeck.onset_program
 import datasets
@@ -78,36 +83,46 @@ def init_args(argv):
     parser.add_argument("--input-audio", type=str, nargs="*",
                         help="If specified, one or more input audio file is used for onset detection")
     parser.add_argument("--speed-test", action="store_true",
-                        help="Test the processing speed. Make sure if you want to use --cpu-only.")
+                        help="Test the processing speed of the current setup. "
+                             "Results will only be shown in console. "
+                             "Make sure if you want to use --cpu-only. "
+                             "Note: Speed test evaluates the test set one by one (no concurrency).")
 
     parser.add_argument_group('Global settings')
-    parser.add_argument("--cpu-only", action="store_true")
-    parser.add_argument("--threads", type=int)
+    parser.add_argument("--cpu-only", action="store_true", help="Use CPU instead of GPU")
+    parser.add_argument("--threads", type=int, help="Manually set the number of threads for concurrency")
 
     parser.add_argument_group('Preprocessing settings')
     parser.add_argument("--no-cached-preprocessing", dest="cached_preprocessing", action="store_false",
                         help="If cache is enabled, all the odf preprocessing result will be cached in MEMORY,"
                              "so use this if you have less than 8GB of RAM and suffer from crashing")
     parser.add_argument("--feature", dest="features", type=str, nargs="+", required=True,
-                        choices=['superflux', 'rcd', 'wpd'])
+                        choices=['superflux', 'rcd', 'wpd'], help="List of features (ODFs)")
     parser.add_argument("--rcd-log", type=bool, default=True)
     parser.add_argument("--superflux-log", type=bool, default=True)
 
     parser.add_argument("--sampling-rate", type=int, default=44100)
-    parser.add_argument("--n-fft", type=int, default=2048)
+    parser.add_argument("--n-fft", type=int, default=2048, help="The size of the FFT window")
     parser.add_argument("--hop-length", type=float, default=441)
-    parser.add_argument("--superflux-lag", type=int, default=1)
+    parser.add_argument("--superflux-lag", type=int, default=1,
+                        help="The order to which the difference is calculated for SuperFlux")
     parser.add_argument("--no-normalize-wave", dest="normalize_wave", action="store_false")
     parser.add_argument("--no-normalize-odf", dest="normalize_odf", action="store_false")
 
     # args for training
     parser.add_argument_group('Training')
-    parser.add_argument("--targeting-delta-frames", type=int, default=1)
+    parser.add_argument("--targeting-delta-frames", type=int, default=1,
+                        help="The delta value for triangular targeting, in frames."
+                             "Default 1. Set 0 for single targeting")
     parser.add_argument("--onset-merge-interval", type=float, default=0.03,
-                        help="This is used for both training and evaluation")
-    parser.add_argument("--num-layer-units", type=int, default=4)
-    parser.add_argument("--num-layers", type=int, default=2)
-    parser.add_argument("--nonlinearity", type=str, default='tanh')
+                        help="In interval within which onsets are merged into one, in seconds."
+                             " This is used for both training and evaluation. Default 0.03.")
+    parser.add_argument("--num-layer-units", type=int, default=4,
+                        help="The number of units in each hidden layer. Default 4")
+    parser.add_argument("--num-layers", type=int, default=2,
+                        help="The number of hidden layers. Default 2.")
+    parser.add_argument("--nonlinearity", type=str, default='tanh',
+                        help="The activation function of hidden layers. Default tanh")
     parser.add_argument("--bidirectional", type=bool, default=True)
     parser.add_argument("--weight", type=float, default=1)
     parser.add_argument("--optimizer", type=str, default='adam', choices=['adam', 'sgd'])
@@ -115,31 +130,47 @@ def init_args(argv):
     parser.add_argument("--early-stop-patience", type=int, default=50)
     parser.add_argument("--early-stop-min-epochs", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--model-filename", type=str)
-    parser.add_argument("--no-revert-to-best", dest="revert_to_best", action="store_false")
-    parser.add_argument("--test-set-index", type=int, default=0)
+    parser.add_argument("--model-filename", type=str,
+                        help="The filename to save the model used in the current run.")
+    parser.add_argument("--no-revert-to-best", dest="revert_to_best", action="store_false",
+                        help="Use this arg if you do not want the training process to revert"
+                             " to the best weights after stopping the training.")
+    parser.add_argument("--test-set-index", type=int, default=0,
+                        help="The index of the test set of Boeck Dataset. Default 0.")
     parser.add_argument("--max-epochs", type=int, default=5000)
     parser.add_argument("--save-checkpoint-to-file", dest="checkpoint_file", type=str,
-                        help="Specify the filename for saving checkpoints at each epoch")
+                        help="Specify the filename for saving checkpoints at each epoch."
+                             " This lowers the performance of training.")
 
     # for peak-picking
     parser.add_argument_group('Peak-picking')
-    parser.add_argument("--peak-picking-threshold", type=float, default=0.35)
-    parser.add_argument("--peak-picking-smooth-window-second", type=float, default=0.05)
+    parser.add_argument("--peak-picking-threshold", type=float, default=0.35,
+                        help="The threshold used for final peak-picking."
+                             "This is used for analyzing audio, instead of evaluating the model. "
+                             "Default 0.35.")
+    parser.add_argument("--peak-picking-smooth-window-second", type=float, default=0.05,
+                        help="The length of the smoothing window for peak-picking in seconds. "
+                             "Default 0.05.")
 
     # args for evaluation
     parser.add_argument_group('Evaluation')
-    parser.add_argument("--peak-picking-threshold-lower", type=float, default=0.05)
-    parser.add_argument("--peak-picking-threshold-upper", type=float, default=0.6)
-    parser.add_argument("--peak-picking-threshold-step", type=float, default=0.05)
-    parser.add_argument("--evaluation-window", type=float, default=0.025)
-    parser.add_argument("--evaluation-delay", type=float, default=0., help="add delay to all detections (seconds")
-    parser.add_argument("--no-concurrent-testing", dest="concurrent_test", action="store_false")
+    parser.add_argument("--peak-picking-threshold-lower", type=float, default=0.05,
+                        help="For evaluating the model, the lower boundary of a best threshold search. "
+                             "Default 0.05.")
+    parser.add_argument("--peak-picking-threshold-upper", type=float, default=0.8,
+                        help="For evaluating the model, the upper boundary of a best threshold search. "
+                             "Default 0.8.")
+    parser.add_argument("--peak-picking-threshold-step", type=float, default=0.05,
+                        help="For evaluating the model, search step of a best threshold search. "
+                             "Default 0.05.")
+    parser.add_argument("--evaluation-window", type=float, default=0.025,
+                        help="The window within which an onset candidate is counted as a true positive, in seconds."
+                             " Default 0.025.")
+    parser.add_argument("--evaluation-delay", type=float, default=0.,
+                        help="Add an delay to all detections when evaluating (seconds). Default 0.")
+    parser.add_argument("--no-concurrent-testing", dest="concurrent_test", action="store_false",
+                        help="For test purpose, disable multi-threading.")
 
-    # args for detection
-    parser.add_argument_group('Detection')
-    parser.add_argument("--save-audio-with-clicks", "-sc", action="store_true")
-    parser.add_argument("--save-detections", "-sd", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -416,7 +447,7 @@ class ModelManager(object):
 
     def predict(self,
                 key=None,
-                wave=None,
+                wave_in=None,
                 verbose=False,
                 sigmoid=True,
                 **kwargs):
@@ -431,10 +462,10 @@ class ModelManager(object):
             t0 = time.perf_counter()
             if key is not None:
                 _, odfs, _, _, audio_len = self.preprocessor.get_embedded_features(key)
-            elif wave is not None:
-                wave = utils.normalize_wav(wave)
-                odfs = self.preprocessor.get_features(wave)
-                audio_len = len(wave) / float(self.args.sampling_rate)
+            elif wave_in is not None:
+                wave_in = utils.normalize_wav(wave_in)
+                odfs = self.preprocessor.get_features(wave_in)
+                audio_len = len(wave_in) / float(self.args.sampling_rate)
                 odfs = odfs.T
                 odfs = Preprocessor.normalize_odf(odfs)
             else:
@@ -986,10 +1017,17 @@ def main(argv):
         save_args(args.save_model_file + ".args", args)
 
     peak_picker = PeakPicker(args)
-    if args.input_audio:
-        raise NotImplementedError()
 
     evaluator = ModelEvaluator(boeck_set, peak_picker, args)
+    if args.input_audio:
+        print("Analyzing Audio")
+        for filepath in args.input_audio:
+            filepath = os.path.abspath(filepath)
+            wave_in, _ = librosa.load(filepath, args.sampling_rate)
+            prediction = model.predict(wave_in=wave_in)
+            onset_candidates = peak_picker.peak_pick(prediction)
+            onset_candidates = onset_utils.combine_onsets_avg(onset_candidates, args.onset_merge_interval)
+            save_onset_output(onset_candidates, wave_in, args.sampling_rate, filepath)
     if args.speed_test:
         print("Performing Speed Test")
         evaluator.speed_test(model)
@@ -998,89 +1036,19 @@ def main(argv):
         evaluator.evaluate_model(model)
 
 
-def evalutate_8f_saved(model_file_template, features, lambdas, filename="Report.txt",
+def save_onset_output(onsets, wave_in, sr, filename):
+    with open(filename+'.onsets.txt', 'w') as onset_file:
+        for timestamp in onsets:
+            onset_file.write(str(timestamp)+'\n')
+    clicks = mir_eval.sonify.clicks(onsets, sr, length=len(wave_in))
+    sum_wave = wave_in + clicks
+    sum_wave = librosa.util.normalize(sum_wave)
+    soundfile.write(filename + '.onsets.wav', sum_wave, sr, subtype='PCM_U8')
+
+def evaluate_8f_saved(model_file_template, features, lambdas, filename="Report.txt",
                        load_as_cp=True, set_cached=True):
     pass
 
 
 if __name__ == '__main__':
     main(None)
-    # evaluate_saved(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220402 085854 100fps\spf-d0.pt"
-    #                , ['superflux'], None,
-    #                filename="Report-spf-static-d0.txt")
-    # train()
-    # evaluate_saved(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220415 - Final tune\task1-d0.pt",
-    #                ['superflux'], None, filename="Report-task1-d0-static.txt")
-    # evaluate_saved(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220415 - Final tune\task1-d1.pt",
-    #                ['superflux'], None, filename="Report-task1-d1-static.txt")
-    # evaluate_saved(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220415 - Final tune\task1-d2.pt",
-    #                ['superflux'], None, filename="Report-task1-d2-static.txt")
-    # evaluate_saved(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220415 - Final tune\task2-d0.pt",
-    #                ['rcd','superflux'], None, filename="Report-task2-d0-static.txt")
-    # evaluate_saved(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220415 - Final tune\task2-d1.pt",
-    #                ['rcd','superflux'], None, filename="Report-task2-d1-static.txt")
-    # evaluate_saved(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220415 - Final tune\task2-d2.pt",
-    #                ['rcd','superflux'], None, filename="Report-task2-d2-static.txt")
-    # model_config = ModelConfig(features=['rcd', 'superflux'], num_layers=2, num_layer_unit=8)
-    # evaluate_saved(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220522 8-f\Model_rcd-spf-fold-0-delta-1-2x8.pt",
-    #                ['rcd','superflux'], None, filename="Report-2x8-d1-static.txt", model_config=model_config,
-    #                smooth=0.05)
-    # model_config = ModelConfig(features=['rcd', 'superflux'], num_layers=3, num_layer_unit=4)
-    # evaluate_saved(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220522 8-f\Model_rcd-spf-fold-0-delta-1-3x4.pt",
-    #                ['rcd','superflux'], None, filename="Report-3x4-d1-static.txt", model_config=model_config,
-    #                smooth=0.05)
-
-    # mc_spnn = ModelConfig(features=['superflux'])
-    # mc_rsnn = ModelConfig(features=['rcd', 'superflux'])
-    # mc_rsnn_2_8 = ModelConfig(features=['rcd', 'superflux'], num_layer_unit=8)
-    # mc_rsnn_3_4 = ModelConfig(features=['rcd', 'superflux'], num_layers=3)
-    #
-    # speed_test(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220415 - Final tune\task1-d0.pt",
-    #            mc_spnn,
-    #            lambda_=0.15, smooth=0)
-    # speed_test(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220415 - Final tune\task1-d0.pt",
-    #            mc_spnn,
-    #            lambda_=0.25, smooth=0.05)
-    # speed_test(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220415 - Final tune\task2-d2.pt",
-    #            mc_rsnn,
-    #            lambda_=0.3, smooth=0)
-    # speed_test(r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220415 - Final tune\task2-d1.pt",
-    #            mc_rsnn,
-    #            lambda_=0.5, smooth=0.05)
-    # speed_test(
-    #     r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220522 8-f\Model_rcd-spf-fold-0-delta-1-2x8.pt",
-    #     mc_rsnn_2_8,
-    #     lambda_=0.45, smooth=0.05)
-    # speed_test(
-    #     r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220522 8-f\Model_rcd-spf-fold-0-delta-1-2x8.pt",
-    #     mc_rsnn_2_8,
-    #     lambda_=0.3, smooth=0)
-    # speed_test(
-    #     r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220522 8-f\Model_rcd-spf-fold-0-delta-1-3x4.pt",
-    #     mc_rsnn_3_4,
-    #     lambda_=0.5, smooth=0.05)
-    # speed_test(
-    #     r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220522 8-f\Model_rcd-spf-fold-0-delta-1-3x4.pt",
-    #     mc_rsnn_3_4,
-    #     lambda_=0.3, smooth=0)
-    # HOP_SIZE = 220.5
-    # SPF_LAG = 2
-    # for i in range(0, 3):
-    #     evaluate_saved(
-    #         f"E:\\Documents\\Personal\\WorkSpace\\Research\\ComplexDODF\\run 20220329 062429 200fps targetfix 5000epochs spf\\spf-d{i}.pt",
-    #         ['superflux'], np.arange(.1, .9, .05), filename=f"spf-200fps-d{i}-smoothed50.txt")
-    # HOP_SIZE = 441
-    # SPF_LAG = 1
-    # for i in range(0, 3):
-    #     evaluate_saved(
-    #         f"E:\\Documents\\Personal\\WorkSpace\\Research\\ComplexDODF\\run 20220402 085854 100fps 50es spf\\spf-d{i}.pt",
-    #         ['superflux'], np.arange(.1, .7, .05), filename=f"spf-100fps-d{i}-smoothed05.txt")
-    # for i in range(0, 3):
-    #     evaluate_saved(
-    #         f"E:\\Documents\\Personal\\WorkSpace\\Research\\ComplexDODF\\run 20220405 134316 100 50es cd+spf\\spf+cd-d{i}.pt",
-    #         ['rcd', 'superflux'], np.arange(.7, .9, .05), filename=f"spf+cd-d{i}-smoothed50-more.txt")
-    # verify_loss()
-    # verify_save_model_function()
-    # find_lr()
-    #     r"E:\Documents\Personal\WorkSpace\Research\ComplexDODF\run 20220217 161019\mdl_20220217 190649_tanh_2x4(bi).pt"
-    #     , ['superflux'], None)
