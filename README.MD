@@ -1,6 +1,12 @@
 # RNN Onset Detector
 Python version `3.9` is used for this project
 
+## Before anything
+
+The directory `boeck` is from [CPJKU/onset_detection](https://github.com/CPJKU/onset_detection).
+
+The rest of this repo is licensed under [LGPL 3.0](https://www.gnu.org/licenses/lgpl-3.0.en.html)
+
 ## Out-of-the-box Commands
 
 ### Analyze Audio
